@@ -22,6 +22,7 @@ import collections
 import os
 import pdb
 import pickle
+import logging
 
 from six.moves import xrange
 from tensorflow.contrib.learn.python.learn import monitored_session as ms
