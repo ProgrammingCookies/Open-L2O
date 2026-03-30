@@ -167,7 +167,7 @@ def main(_):
             print ("training_loss={}".format(cost))
 
             # Evaluation.
-            if (e+1) % FLAGS.evaluation_period == 0:
+            if (e+1) % FLAGS.evaluation_period == 0 or e+1 == FLAGS.num_epochs:
                 if FLAGS.if_cl:
                     num_unrolls_eval_cur = num_unrolls_eval[curriculum_idx]
                 else:
