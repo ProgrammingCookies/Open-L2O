@@ -121,7 +121,7 @@ class Adam(tf.keras.optimizers.Adam):
 
   def get_gradients(self, loss, params):
     # Compute gradients directly to avoid Keras crashing on None gradients.
-    grads = tf.compat.v1.gradients(loss, params)
+    grads = tf.gradients(loss, params)
 
     fixed_grads = []
     for g, p in zip(grads, params):
