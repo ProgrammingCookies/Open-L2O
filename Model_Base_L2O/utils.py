@@ -114,19 +114,19 @@ class EvalNMSE(tf.keras.metrics.Mean):
 
 class Adam(tf.keras.optimizers.Adam):
 
-  def __init__(self, var_list, freeze_layer=False, **kwargs):
+  def __init__(self, var_list, freeze_layer=False, debug=False, **kwargs):
     self.var_list = var_list
     self.freeze_layer = freeze_layer
+    self.debug = debug
     super(Adam, self).__init__(**kwargs)
 
   def get_gradients(self, loss, params):
-    # Compute gradients directly to avoid Keras crashing on None gradients.
     grads = tf.gradients(loss, params)
-
     fixed_grads = []
     for g, p in zip(grads, params):
       if g is None:
-        print("None gradient for:", p.name)
+        if self.debug:
+          print("None gradient for:", p.name)
         fixed_grads.append(tf.zeros_like(p))
       else:
         fixed_grads.append(g)
@@ -138,20 +138,17 @@ class Adam(tf.keras.optimizers.Adam):
 
     for g, v in grads_and_vars:
       if g is None:
-        print("Skipping None gradient for:", v.name)
+        if self.debug:
+          print("Skipping None gradient for:", v.name)
         continue
 
-      if v.name not in self.var_list:
-        print("Missing in var_list:", v.name)
-
       if self.freeze_layer:
-        # Unknown vars are treated as frozen / not trainable at this stage
         if self.var_list.get(v.name, 1) == 0:
           grads_and_vars_multiplied.append((g, v))
         else:
-          print("Frozen variable skipped:", v.name)
+          if self.debug and v.name not in self.var_list:
+            print("Frozen variable skipped:", v.name)
       else:
-        # Unknown vars get default age 0
         layer_age = self.var_list.get(v.name, 0)
         g_mul = g * 0.3**layer_age
         grads_and_vars_multiplied.append((g_mul, v))

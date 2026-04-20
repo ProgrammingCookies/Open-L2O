@@ -16,6 +16,7 @@ flags.DEFINE_string('model_name', 'lista', '')
 flags.DEFINE_integer('num_layers', 16, 'The number of layers.', lower_bound=1)
 flags.DEFINE_float('model_lam', 0.4, 'The L1 regularization strength used for model initialization.')
 flags.DEFINE_boolean('share_W', False, 'Share W over different layers.')
+flags.DEFINE_boolean('debug', False, 'Enable debug mode.')
 # Loss function
 flags.DEFINE_enum('task', 'sc', ['sc', 'lasso', 'cs'],
         'The loss function used for training. Choose between '
