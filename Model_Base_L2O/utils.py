@@ -120,13 +120,13 @@ class Adam(tf.keras.optimizers.Adam):
     super(Adam, self).__init__(**kwargs)
 
   def get_gradients(self, loss, params):
-    # Compute gradients directly instead of calling Keras' parent method,
-    # because the parent method crashes when any gradient is None.
-    grads = tf.gradients(loss, params)
+    # Compute gradients directly to avoid Keras crashing on None gradients.
+    grads = tf.compat.v1.gradients(loss, params)
 
     fixed_grads = []
     for g, p in zip(grads, params):
       if g is None:
+        print("None gradient for:", p.name)
         fixed_grads.append(tf.zeros_like(p))
       else:
         fixed_grads.append(g)
@@ -135,14 +135,25 @@ class Adam(tf.keras.optimizers.Adam):
   def apply_gradients(self, grads_and_vars, name=None,
                       all_reduce_sum_gradients=True):
     grads_and_vars_multiplied = []
+
     for g, v in grads_and_vars:
       if g is None:
+        print("Skipping None gradient for:", v.name)
         continue
+
+      if v.name not in self.var_list:
+        print("Missing in var_list:", v.name)
+
       if self.freeze_layer:
-        if self.var_list[v.name] == 0:
+        # Unknown vars are treated as frozen / not trainable at this stage
+        if self.var_list.get(v.name, 1) == 0:
           grads_and_vars_multiplied.append((g, v))
+        else:
+          print("Frozen variable skipped:", v.name)
       else:
-        g_mul = g * 0.3**self.var_list[v.name]
+        # Unknown vars get default age 0
+        layer_age = self.var_list.get(v.name, 0)
+        g_mul = g * 0.3**layer_age
         grads_and_vars_multiplied.append((g_mul, v))
 
     return super(Adam, self).apply_gradients(
