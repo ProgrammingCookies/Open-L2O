@@ -58,87 +58,7 @@ flags.DEFINE_string('data_dir', None, 'Data directory for the experiment.')
 flags.DEFINE_string('exp_name', 'lista_sc', 'The name of the experiment.')
 flags.DEFINE_integer('replicate', 1, 'The replicate id of the experiment.')
 
-
-def run(
-    model_name,
-    base_dir,
-    data_dir,
-    task='sc',
-    train_batch_size=128,
-    eval_batch_size=1024,
-    epochs=125,
-    mode='train'
-):
-
-  _NUM_TRAIN_IMAGES = FLAGS.num_train_images
-  _NUM_EVAL_IMAGES  = FLAGS.num_val_images
-
-  if task == 'sc' or task == 'lasso':
-    training_steps_per_epoch = int(_NUM_TRAIN_IMAGES // train_batch_size)
-    validation_steps_per_epoch = int(_NUM_EVAL_IMAGES // eval_batch_size)
-  elif task == 'cs':
-    training_steps_per_epoch = 3125
-    validation_steps_per_epoch = 10
-
-  _BASE_LR = FLAGS.base_lr
-
-  # Deal with paths of data, checkpoints and logs
-  base_dir = os.path.abspath(base_dir)
-  model_dir = os.path.join(base_dir, 'models', FLAGS.exp_name,
-          'replicate_' + str(FLAGS.replicate))
-  log_dir = os.path.join(base_dir, 'logs', FLAGS.exp_name,
-          'replicate_' + str(FLAGS.replicate))
-  logging.info('Saving checkpoints at %s', model_dir)
-  logging.info('Saving tensorboard summaries at %s', log_dir)
-  logging.info('Use training batch size: %s.', train_batch_size)
-  logging.info('Use eval batch size: %s.', eval_batch_size)
-  logging.info('Training model using data_dir in directory: %s', data_dir)
-
-  if task == 'sc' or task == 'lasso':
-    A = np.load(
-        os.path.join(data_dir, 'A.npy'),
-        allow_pickle=True).astype(np.float32)
-    M, N = A.shape
-    F = None
-    D = None
-  elif task == 'cs':
-    A = np.load(
-        os.path.join(data_dir, 'A_128_512.npy'),
-        allow_pickle=True).astype(np.float32)
-    D = np.load(
-        os.path.join(data_dir, 'D_256_512.npy'),
-        allow_pickle=True).astype(np.float32)
-    N = D.shape[0]
-    F = D.shape[1]
-  else:
-    raise ValueError('invalid task type')
-
-  if FLAGS.model_name.startswith('alista'):
-    alista_W = np.load(
-        os.path.join(data_dir, 'W.npy'),
-        allow_pickle=True).astype(np.float32)
-
-  np.random.seed(FLAGS.seed)
-
-  if mode == 'train':
-      train_dataset = data_preprocessing.input_fn(
-          True,
-          data_dir,
-          train_batch_size,
-          task,
-          drop_remainder=False,
-          A=A)
-      val_dataset = data_preprocessing.input_fn(
-          False,
-          data_dir,
-          eval_batch_size,
-          task,
-          drop_remainder=False,
-          A=A)
-
-  summary_writer = tf.summary.create_file_writer(log_dir)
-
-  # Define a Lista model
+def build_model(A, D, N, M, alista_W=None):
   if FLAGS.model_name == 'lista':
     model = models.Lista(
         A, FLAGS.num_layers, FLAGS.model_lam, FLAGS.share_W, D, name='Lista'
@@ -197,39 +117,131 @@ def run(
   else:
     raise NotImplementedError('Other types of models not are not implemented yet')
 
-  var_list = {}
-  checkpoint = tf.train.Checkpoint(model=model)
-  prev_model, prev_layer = utils.check_and_load_partial(model_dir, FLAGS.num_layers)
+  return model, output_interval
+
+
+def run(
+    model_name,
+    base_dir,
+    data_dir,
+    task='sc',
+    train_batch_size=128,
+    eval_batch_size=1024,
+    epochs=125,
+    mode='train'
+):
+
+  _NUM_TRAIN_IMAGES = FLAGS.num_train_images
+  _NUM_EVAL_IMAGES  = FLAGS.num_val_images
+
+  if task == 'sc' or task == 'lasso':
+    training_steps_per_epoch = int(_NUM_TRAIN_IMAGES // train_batch_size)
+    validation_steps_per_epoch = int(_NUM_EVAL_IMAGES // eval_batch_size)
+  elif task == 'cs':
+    training_steps_per_epoch = 3125
+    validation_steps_per_epoch = 10
+
+  _BASE_LR = FLAGS.base_lr
+
+  # Deal with paths of data, checkpoints and logs
+  base_dir = os.path.abspath(base_dir)
+  model_dir = os.path.join(base_dir, 'models', FLAGS.exp_name,
+          'replicate_' + str(FLAGS.replicate))
+  log_dir = os.path.join(base_dir, 'logs', FLAGS.exp_name,
+          'replicate_' + str(FLAGS.replicate))
+  logging.info('Saving checkpoints at %s', model_dir)
+  logging.info('Saving tensorboard summaries at %s', log_dir)
+  logging.info('Use training batch size: %s.', train_batch_size)
+  logging.info('Use eval batch size: %s.', eval_batch_size)
+  logging.info('Training model using data_dir in directory: %s', data_dir)
+
+  if task == 'sc' or task == 'lasso':
+    A = np.load(
+        os.path.join(data_dir, 'A.npy'),
+        allow_pickle=True).astype(np.float32)
+    M, N = A.shape
+    F = None
+    D = None
+  elif task == 'cs':
+    A = np.load(
+        os.path.join(data_dir, 'A_128_512.npy'),
+        allow_pickle=True).astype(np.float32)
+    D = np.load(
+        os.path.join(data_dir, 'D_256_512.npy'),
+        allow_pickle=True).astype(np.float32)
+    N = D.shape[0]
+    F = D.shape[1]
+    M = A.shape[0]
+  else:
+    raise ValueError('invalid task type')
+
+  alista_W = None
+  if FLAGS.model_name.startswith('alista'):
+    alista_W = np.load(
+        os.path.join(data_dir, 'W.npy'),
+        allow_pickle=True).astype(np.float32)
+
+  np.random.seed(FLAGS.seed)
+
+  if mode == 'train':
+    train_dataset = data_preprocessing.input_fn(
+        True,
+        data_dir,
+        train_batch_size,
+        task,
+        drop_remainder=False,
+        A=A)
+    val_dataset = data_preprocessing.input_fn(
+        False,
+        data_dir,
+        eval_batch_size,
+        task,
+        drop_remainder=False,
+        A=A)
+
+  summary_writer = tf.summary.create_file_writer(log_dir)
 
   if task == 'lasso':
     _A_const = tf.constant(A, name='A_lasso_const')
     loss = utils.LassoLoss(_A_const, FLAGS.lasso_lam, N, F)
-    metrics_compile = [utils.LassoObjective('lasso', _A_const, FLAGS.lasso_lam, M, N, -1)]
+    metrics_compile = [
+        utils.LassoObjective('lasso', _A_const, FLAGS.lasso_lam, M, N, -1)
+    ]
     monitor = 'val_lasso'
   else:
     loss = utils.MSE(N, F)
     metrics_compile = [utils.NMSE('nmse', N)]
     monitor = 'val_nmse'
 
+  prev_model, prev_layer = utils.check_and_load_partial(model_dir, FLAGS.num_layers)
+
   if mode == 'test':
+    model, output_interval = build_model(A, D, N, M, alista_W)
+    for layer_id in range(FLAGS.num_layers):
+      model.create_cell(layer_id)
+    _ = model(tf.zeros((1, M), dtype=tf.float32))
+
+    checkpoint = tf.train.Checkpoint(model=model)
+
     if prev_layer != FLAGS.num_layers:
       raise ValueError('Should have a fully trained model!')
     checkpoint.restore(prev_model).assert_existing_objects_matched()
+
     res_dict = {}
     eval_files = FLAGS.test_files
+
     if task == 'lasso':
-      # do layer-wise testing
       test_metrics = [
-        utils.LassoObjective('lasso_layer{}'.format(i), _A_const, FLAGS.lasso_lam, M, N, i)
-        for i in range(FLAGS.num_layers)
+        utils.LassoObjective(
+            'lasso_layer{}'.format(i), _A_const, FLAGS.lasso_lam, M, N, i
+        ) for i in range(FLAGS.num_layers)
       ]
     else:
       test_metrics = [
           utils.EvalNMSE('nmse_layer{}'.format(i), M, N, output_interval, i)
           for i in range(FLAGS.num_layers)
       ]
-    for layer_id in range(FLAGS.num_layers):
-      model.create_cell(layer_id)
+
     for i in range(len(eval_files)):
       val_ds = data_preprocessing.input_fn(
           False,
@@ -238,15 +250,18 @@ def run(
           drop_remainder=False,
           A=A,
           filename=eval_files[i])
+
       logging.info('Compiling model.')
       model.compile(
           optimizer=tf.keras.optimizers.Adam(_BASE_LR),
           loss=loss,
           metrics=test_metrics,
           run_eagerly=True)
+
       metrics = model.evaluate(
           x=val_ds,
           verbose=2)
+
       if task == 'lasso':
         output = model.predict(
             x=val_ds,
@@ -254,45 +269,68 @@ def run(
         final_xh = output[:, -N:]
         eval_file_basename = os.path.basename(eval_files[i]).strip('.npy')
         np.save(os.path.join(model_dir, eval_file_basename + '_final_output.npy'), final_xh)
+
       res_dict[eval_files[i]] = metrics[1:]
-    for k,v in res_dict.items():
-        logging.info('%s : %s', k, str(v))
+
+    for k, v in res_dict.items():
+      logging.info('%s : %s', k, str(v))
     return
 
   for layer_id in range(FLAGS.num_layers):
     logging.info('Building Lista Keras model.')
-    model.create_cell(layer_id)
 
-    # Deal with the variables that have been trained in previous layers
-    for name in var_list:
-      var_list[name] += 1
-    # Deal with the variables in the current layer
-    for v in model.layers[layer_id].trainable_variables:
-      if v.name not in var_list:
-        var_list[v.name] = 0
+    # Rebuild a fresh model for this stage
+    model, output_interval = build_model(A, D, N, M, alista_W)
 
-    if layer_id == prev_layer - 1 and prev_model:
-      checkpoint.restore(prev_model).assert_existing_objects_matched()
-      logging.info('Checkpoint restored from %s.', prev_model)
+    # Create cells up to current layer
+    for i in range(layer_id + 1):
+      model.create_cell(i)
+
+    # Force model build after adding cells
+    _ = model(tf.zeros((1, M), dtype=tf.float32))
+
+    # Rebuild var_list for the currently active layers
+    var_list = {}
+    for i in range(layer_id + 1):
+      for name in list(var_list.keys()):
+        var_list[name] += 1
+      for v in model.layers[i].trainable_variables:
+        if v.name not in var_list:
+          var_list[v.name] = 0
+
+    checkpoint = tf.train.Checkpoint(model=model)
+
+    # If there is a previously saved checkpoint for this exact layer count, load it
+    current_model, current_layer = utils.check_and_load_partial(model_dir, layer_id + 1)
+
+    if current_layer == layer_id + 1 and current_model:
+      checkpoint.restore(current_model).assert_existing_objects_matched()
+      logging.info('Checkpoint restored from %s.', current_model)
+
       model.compile(
           optimizer=tf.keras.optimizers.Adam(_BASE_LR),
           loss=loss,
           metrics=metrics_compile,
           run_eagerly=True)
+
       metrics = model.evaluate(
           x=val_dataset,
           verbose=2)
       val_metric = metrics[1]
+
       with summary_writer.as_default():
         for value, key in zip(metrics, model.metrics_names):
           tf.summary.scalar(key, value, layer_id + 1)
       continue
-    elif layer_id < prev_layer:
-      logging.info('Skip layer %d.', layer_id + 1)
-      continue
+
+    # Otherwise, if this is a deeper layer, restore previous layer checkpoint
+    if layer_id > 0:
+      prev_ckpt, prev_ckpt_layer = utils.check_and_load_partial(model_dir, layer_id)
+      if prev_ckpt and prev_ckpt_layer == layer_id:
+        checkpoint.restore(prev_ckpt).assert_existing_objects_matched()
+        logging.info('Checkpoint restored from %s.', prev_ckpt)
 
     logging.info('Compiling model.')
-
     model.compile(
         optimizer=utils.Adam(var_list, True, learning_rate=_BASE_LR),
         loss=loss,
@@ -345,11 +383,14 @@ def run(
           validation_steps=validation_steps_per_epoch,
           verbose=2)
       logging.info('Finished fitting Lista Keras model.')
+
     model.summary()
     val_metric = history.history[monitor][-1]
+
     with summary_writer.as_default():
       for key in history.history.keys():
         tf.summary.scalar(key, history.history[key][-1], layer_id + 1)
+
     try:
       checkpoint.save(utils.save_partial(model_dir, layer_id))
       logging.info('Checkpoint saved at %s', utils.save_partial(model_dir, layer_id))
