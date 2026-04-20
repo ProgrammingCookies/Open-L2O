@@ -277,7 +277,8 @@ def run(
       model.compile(
           optimizer=tf.keras.optimizers.Adam(_BASE_LR),
           loss=loss,
-          metrics=metrics_compile)
+          metrics=metrics_compile,
+          run_eagerly=True)
       metrics = model.evaluate(
           x=val_dataset,
           verbose=2)
@@ -295,7 +296,8 @@ def run(
     model.compile(
         optimizer=utils.Adam(var_list, True, learning_rate=_BASE_LR),
         loss=loss,
-        metrics=metrics_compile)
+        metrics=metrics_compile,
+        run_eagerly=True)
 
     earlystopping_cb = tf.keras.callbacks.EarlyStopping(
         monitor=monitor,
@@ -322,7 +324,8 @@ def run(
       model.compile(
           optimizer=utils.Adam(var_list, learning_rate=_BASE_LR * 0.2 * 0.1**i),
           loss=loss,
-          metrics=metrics_compile)
+          metrics=metrics_compile,
+          run_eagerly=True)
 
       earlystopping_cb = tf.keras.callbacks.EarlyStopping(
           monitor=monitor,
