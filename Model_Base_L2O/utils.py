@@ -119,6 +119,16 @@ class Adam(tf.keras.optimizers.Adam):
     self.freeze_layer = freeze_layer
     super(Adam, self).__init__(**kwargs)
 
+  def get_gradients(self, loss, params):
+    grads = super(Adam, self).get_gradients(loss, params)
+    fixed_grads = []
+    for g, p in zip(grads, params):
+      if g is None:
+        fixed_grads.append(tf.zeros_like(p))
+      else:
+        fixed_grads.append(g)
+    return fixed_grads
+
   def apply_gradients(self, grads_and_vars, name=None,
                       all_reduce_sum_gradients=True):
     grads_and_vars_multiplied = []
@@ -131,8 +141,8 @@ class Adam(tf.keras.optimizers.Adam):
       else:
         g_mul = g * 0.3**self.var_list[v.name]
         grads_and_vars_multiplied.append((g_mul, v))
-    super(Adam, self).apply_gradients(grads_and_vars_multiplied, name,
-                                      all_reduce_sum_gradients)
+    super(Adam, self).apply_gradients(
+        grads_and_vars_multiplied, name, all_reduce_sum_gradients)
 
 
 # def save_partial(checkpoint_dir, arch):
