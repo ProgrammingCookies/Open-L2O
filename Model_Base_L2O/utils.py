@@ -120,7 +120,10 @@ class Adam(tf.keras.optimizers.Adam):
     super(Adam, self).__init__(**kwargs)
 
   def get_gradients(self, loss, params):
-    grads = super(Adam, self).get_gradients(loss, params)
+    # Compute gradients directly instead of calling Keras' parent method,
+    # because the parent method crashes when any gradient is None.
+    grads = tf.gradients(loss, params)
+
     fixed_grads = []
     for g, p in zip(grads, params):
       if g is None:
@@ -141,8 +144,9 @@ class Adam(tf.keras.optimizers.Adam):
       else:
         g_mul = g * 0.3**self.var_list[v.name]
         grads_and_vars_multiplied.append((g_mul, v))
-    super(Adam, self).apply_gradients(
-        grads_and_vars_multiplied, name, all_reduce_sum_gradients)
+
+    return super(Adam, self).apply_gradients(
+        grads_and_vars_multiplied, name=name)
 
 
 # def save_partial(checkpoint_dir, arch):

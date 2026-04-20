@@ -241,7 +241,8 @@ def run(
       model.compile(
           optimizer=tf.keras.optimizers.Adam(_BASE_LR),
           loss=loss,
-          metrics=test_metrics)
+          metrics=test_metrics,
+          run_eagerly=True)
       metrics = model.evaluate(
           x=val_ds,
           verbose=2)
