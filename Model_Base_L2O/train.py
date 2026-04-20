@@ -36,9 +36,9 @@ flags.DEFINE_string('gain_func', 'relu',
 flags.DEFINE_float('tista_sigma2', None,
         'sigma2 for linear measurement noise for Tista.')
 # Support selection settings
-flags.DEFINE_float('ss_q_per_layer', '1.2',
+flags.DEFINE_float('ss_q_per_layer', 1.2,
         'Extra percentage of coordinates added to the support set in each layer.')
-flags.DEFINE_float('ss_maxq', '13',
+flags.DEFINE_float('ss_maxq', 13.0,
         'Maximum percentage of coordinates selected in the support set.')
 # Exp settings
 flags.DEFINE_integer('seed', 42, 'The RNG seed for the experiment.')
@@ -327,7 +327,7 @@ def run(
     if layer_id > 0:
       prev_ckpt, prev_ckpt_layer = utils.check_and_load_partial(model_dir, layer_id)
       if prev_ckpt and prev_ckpt_layer == layer_id:
-        checkpoint.restore(prev_ckpt).assert_existing_objects_matched()
+        checkpoint.restore(prev_ckpt).expect_partial()
         logging.info('Checkpoint restored from %s.', prev_ckpt)
 
     logging.info('Compiling model.')
