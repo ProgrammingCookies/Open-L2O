@@ -1,4 +1,5 @@
 import os
+import json
 from absl import app
 from absl import flags
 from absl import logging
@@ -214,8 +215,10 @@ def run(
     if prev_layer != FLAGS.num_layers:
       raise ValueError('Should have a fully trained model!')
     checkpoint.restore(prev_model).assert_existing_objects_matched()
+
     res_dict = {}
     eval_files = FLAGS.test_files
+
     if task == 'lasso':
       # do layer-wise testing
       test_metrics = [
@@ -227,8 +230,10 @@ def run(
           utils.EvalNMSE('nmse_layer{}'.format(i), M, N, output_interval, i)
           for i in range(FLAGS.num_layers)
       ]
+
     for layer_id in range(FLAGS.num_layers):
       model.create_cell(layer_id)
+
     for i in range(len(eval_files)):
       val_ds = data_preprocessing.input_fn(
           False,
@@ -237,24 +242,50 @@ def run(
           drop_remainder=False,
           A=A,
           filename=eval_files[i])
+
       logging.info('Compiling model.')
       model.compile(
           optimizer=tf.keras.optimizers.Adam(_BASE_LR),
           loss=loss,
           metrics=test_metrics)
+
       metrics = model.evaluate(
           x=val_ds,
           verbose=2)
+
+      metric_names = model.metrics_names
+
       if task == 'lasso':
         output = model.predict(
             x=val_ds,
             verbose=2)
         final_xh = output[:, -N:]
-        eval_file_basename = os.path.basename(eval_files[i]).strip('.npy')
+        eval_file_basename = os.path.basename(eval_files[i]).replace('.npy', '')
         np.save(os.path.join(model_dir, eval_file_basename + '_final_output.npy'), final_xh)
-      res_dict[eval_files[i]] = metrics[1:]
-    for k,v in res_dict.items():
-        logging.info('%s : %s', k, str(v))
+      else:
+        eval_file_basename = os.path.basename(eval_files[i]).replace('.npy', '')
+
+      # Save structured metrics for this eval file
+      metrics_dict = {name: float(value) for name, value in zip(metric_names, metrics)}
+
+      save_path = os.path.join(model_dir, eval_file_basename + '_metrics.json')
+      with open(save_path, 'w') as f:
+        json.dump(metrics_dict, f, indent=2)
+
+      logging.info('Saved metrics to %s', save_path)
+
+      res_dict[eval_files[i]] = metrics_dict
+
+    # Save all eval results together too
+    all_results_path = os.path.join(model_dir, 'all_test_metrics.json')
+    with open(all_results_path, 'w') as f:
+      json.dump(res_dict, f, indent=2)
+
+    logging.info('Saved all test metrics to %s', all_results_path)
+
+    for k, v in res_dict.items():
+      logging.info('%s : %s', k, str(v))
+
     return
 
   for layer_id in range(FLAGS.num_layers):
