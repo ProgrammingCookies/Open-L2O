@@ -19,8 +19,8 @@ class AlistaCell(keras.layers.Layer):
     super(AlistaCell, self).__init__(name=name)
     self._A = A
     self._W = W
-    self._M = self._A.shape[0]
-    self._N = self._A.shape[1]
+    self._M = int(self._A.shape[0])
+    self._N = int(self._A.shape[1])
     self.step_size = step_size
     self.theta = theta
     self.q = q

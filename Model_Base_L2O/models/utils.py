@@ -31,7 +31,7 @@ def shrink_ss(inputs_, theta_, q, return_index=False):
     :returns: TODO
     """
     abs_ = tf.abs(inputs_)
-    thres_ = tfp.stats.percentile(abs_, 100.0-q, axis=1, keepdims=True)
+    thres_ = tfp.stats.percentile(abs_, 100.0-q, axis=1, keep_dims=True)
 
     """
     Entries that are greater than thresholds and in the top q% simultnaneously

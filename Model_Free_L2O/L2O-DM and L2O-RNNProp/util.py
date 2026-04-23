@@ -244,7 +244,15 @@ def get_config(problem_name, path=None, mode=None, num_hidden_layer=None, net_na
         "net_path": path
     }}
     net_assignments = None
-  
+  elif problem_name == "lasso_25_50":
+    problem = problems.lasso_m_n(batch_size=128, m=25, n=50)
+    net_config = {"cw": {
+        "net": "CoordinateWiseDeepLSTM",
+        "net_options": {"layers": (20, 20)},
+        "net_path": path
+    }}
+    net_assignments = None
+
   else:
     raise ValueError("{} is not a valid problem".format(problem_name))
 

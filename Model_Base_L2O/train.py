@@ -3,6 +3,8 @@ from absl import app
 from absl import flags
 from absl import logging
 import numpy as np
+import tensorflow as _tf_v1
+_tf_v1.enable_eager_execution()
 import tensorflow.compat.v2 as tf
 
 import data_preprocessing

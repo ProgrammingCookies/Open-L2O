@@ -134,6 +134,32 @@ def lasso(batch_size=128, num_dims=10, stddev=0.01, l=0.005, dtype=tf.float32):
   return build
 
 
+def lasso_m_n(batch_size=128, m=25, n=50, stddev=0.01, l=0.005, dtype=tf.float32):
+  """LASSO with rectangular A (m x n): f(x) = 0.5*||Ax - y||^2 + l*||x||_1."""
+  def build():
+    x = tf.get_variable(
+        "x",
+        shape=[batch_size, n],
+        dtype=dtype,
+        initializer=tf.random_normal_initializer(stddev=stddev))
+    w = tf.get_variable("w",
+                        shape=[batch_size, m, n],
+                        dtype=dtype,
+                        initializer=tf.random_normal_initializer(stddev=1.0 / m),
+                        trainable=False)
+    y = tf.get_variable("y",
+                        shape=[batch_size, m, 1],
+                        dtype=dtype,
+                        initializer=tf.random_normal_initializer(stddev=1.0),
+                        trainable=False)
+    product = tf.matmul(w, tf.expand_dims(x, -1))
+    left_term = 0.5 * tf.reduce_sum((product - y) ** 2, 1)
+    other_term = l * tf.norm(x, ord=1, axis=1, keepdims=True)
+    result = tf.reduce_mean(left_term + other_term)
+    return result
+  return build
+
+
 def lasso_fixed(data_A, data_b, stddev=0.01, l=0.005, dtype=tf.float32):
   """lasso problem: f(x) = 0.5*||Wx - y||2 + lamada *||x||1."""
   a = data_A

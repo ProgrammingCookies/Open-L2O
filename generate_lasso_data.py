@@ -23,6 +23,14 @@ def generate_A(M, N, rng):
     return A
 
 
+def generate_W(A):
+    """Analytical ALISTA weight matrix W = (AA^T)^{-1} A with unit-norm columns."""
+    AAt = A @ A.T
+    W = np.linalg.solve(AAt, A)
+    W = W / np.linalg.norm(W, axis=0, keepdims=True)
+    return W.astype(np.float32)
+
+
 def generate_samples(A, num_samples, sparsity, noise_std, rng):
     M, N = A.shape
     k = max(1, int(round(sparsity * N)))
@@ -46,6 +54,10 @@ def main(_):
     A = generate_A(FLAGS.m, FLAGS.n, rng)
     np.save(os.path.join(FLAGS.output_dir, 'A.npy'), A)
     logging.info('Saved A.npy with shape %s', A.shape)
+
+    W = generate_W(A)
+    np.save(os.path.join(FLAGS.output_dir, 'W.npy'), W)
+    logging.info('Saved W.npy with shape %s', W.shape)
 
     for split, count in [('train', FLAGS.num_train), ('val', FLAGS.num_val), ('test', FLAGS.num_test)]:
         data = generate_samples(A, count, FLAGS.sparsity, FLAGS.noise_std, rng)
