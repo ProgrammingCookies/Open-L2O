@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import re
 from timeit import default_timer as timer
 
 import numpy as np
@@ -111,6 +112,7 @@ def get_default_net_config(path):
 
 def get_config(problem_name, path=None, mode=None, num_hidden_layer=None, net_name=None):
   """Returns problem configuration."""
+
   if problem_name == "simple":
     problem = problems.simple()
     net_config = {"cw": {
@@ -244,17 +246,19 @@ def get_config(problem_name, path=None, mode=None, num_hidden_layer=None, net_na
         "net_path": path
     }}
     net_assignments = None
-  elif problem_name == "lasso_25_50":
-    problem = problems.lasso_m_n(batch_size=128, m=25, n=50)
-    net_config = {"cw": {
-        "net": "CoordinateWiseDeepLSTM",
-        "net_options": {"layers": (20, 20)},
-        "net_path": path
-    }}
-    net_assignments = None
-
   else:
-    raise ValueError("{} is not a valid problem".format(problem_name))
+    lasso_match = re.match(r'^lasso_(\d+)_(\d+)$', problem_name)
+    if lasso_match:
+        m, n = int(lasso_match.group(1)), int(lasso_match.group(2))
+        problem = problems.lasso_m_n(batch_size=128, m=m, n=n)
+        net_config = {"cw": {
+            "net": "CoordinateWiseDeepLSTM",
+            "net_options": {"layers": (20, 20)},
+            "net_path": path
+        }}
+        net_assignments = None
+    else:
+        raise ValueError("{} is not a valid problem".format(problem_name))
 
   if net_name == "RNNprop":
       default_config = {

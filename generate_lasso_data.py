@@ -35,21 +35,36 @@ def generate_samples(A, num_samples, sparsity, noise_std, rng):
     M, N = A.shape
     k = max(1, int(round(sparsity * N)))
     data = np.zeros((num_samples, M + N), dtype=np.float32)
+    clean_data = np.zeros((num_samples, M + N), dtype=np.float32) if noise_std > 0 else None
     for i in range(num_samples):
         x = np.zeros(N, dtype=np.float32)
         support = rng.choice(N, k, replace=False)
         x[support] = rng.randn(k).astype(np.float32)
-        y = A @ x
+        y_clean = A @ x
         if noise_std > 0:
-            y += (noise_std * rng.randn(M)).astype(np.float32)
+            y = y_clean + (noise_std * rng.randn(M)).astype(np.float32)
+            clean_data[i, :M] = y_clean
+            clean_data[i, M:] = x
+        else:
+            y = y_clean
         data[i, :M] = y
         data[i, M:] = x
-    return data
+    return data, clean_data
 
 
 def main(_):
-    rng = np.random.RandomState(FLAGS.seed)
     os.makedirs(FLAGS.output_dir, exist_ok=True)
+
+    splits = ['train', 'val', 'test']
+    expected_files = ['A.npy', 'W.npy'] + [f'{s}_data.npy' for s in splits]
+    if FLAGS.noise_std > 0:
+        expected_files += [f'{s}_data_clean.npy' for s in splits]
+
+    if all(os.path.exists(os.path.join(FLAGS.output_dir, f)) for f in expected_files):
+        logging.info('Data already exists in %s, skipping generation.', FLAGS.output_dir)
+        return
+
+    rng = np.random.RandomState(FLAGS.seed)
 
     A = generate_A(FLAGS.m, FLAGS.n, rng)
     np.save(os.path.join(FLAGS.output_dir, 'A.npy'), A)
@@ -60,10 +75,14 @@ def main(_):
     logging.info('Saved W.npy with shape %s', W.shape)
 
     for split, count in [('train', FLAGS.num_train), ('val', FLAGS.num_val), ('test', FLAGS.num_test)]:
-        data = generate_samples(A, count, FLAGS.sparsity, FLAGS.noise_std, rng)
+        data, clean_data = generate_samples(A, count, FLAGS.sparsity, FLAGS.noise_std, rng)
         path = os.path.join(FLAGS.output_dir, f'{split}_data.npy')
         np.save(path, data)
         logging.info('Saved %s with shape %s', path, data.shape)
+        if clean_data is not None:
+            clean_path = os.path.join(FLAGS.output_dir, f'{split}_data_clean.npy')
+            np.save(clean_path, clean_data)
+            logging.info('Saved %s with shape %s', clean_path, clean_data.shape)
 
 
 if __name__ == '__main__':

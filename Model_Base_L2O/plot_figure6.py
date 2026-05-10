@@ -106,10 +106,11 @@ def load_and_evaluate(key, args, A, Y, M, N):
     label, exp_prefix, interval_fn, builder = MODEL_REGISTRY[key]
     interval = interval_fn(M, N)
 
-    num_layers = args.num_layers
-    exp_name   = f'{exp_prefix}_lasso-{args.lam}_m{M}_n{N}'
-    model_dir  = os.path.join(args.base_dir, 'models', exp_name,
-                               f'replicate_{args.replicate}')
+    num_layers   = args.num_layers
+    noise_suffix = f'_noise{args.noise_std}' if args.noise_std > 0 else ''
+    exp_name     = f'{exp_prefix}_lasso-{args.lam}_m{M}_n{N}{noise_suffix}_L{num_layers}'
+    model_dir    = os.path.join(args.base_dir, 'models', exp_name,
+                                f'replicate_{args.replicate}')
 
     ckpt_dir  = os.path.join(model_dir, f'layer_{num_layers}')
     ckpt_path = tf.train.latest_checkpoint(ckpt_dir)
@@ -269,6 +270,8 @@ if __name__ == '__main__':
                         help='Base directory containing models/')
     parser.add_argument('--replicate', type=int, default=1,
                         help='Replicate id used during training (default: 1)')
+    parser.add_argument('--noise_std', type=float, default=0.0,
+                        help='Noise std used during training (default: 0.0)')
     parser.add_argument('--fista_iters', type=int, default=2000,
                         help='FISTA iterations for f* reference (default: 2000)')
 

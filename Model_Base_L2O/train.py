@@ -1,4 +1,7 @@
 import os
+import time
+import json
+import datetime
 from absl import app
 from absl import flags
 from absl import logging
@@ -8,6 +11,7 @@ _tf_v1.enable_eager_execution()
 import tensorflow.compat.v2 as tf
 
 import data_preprocessing
+import gpu_mem_sampler
 import models
 import utils
 
@@ -59,6 +63,7 @@ flags.DEFINE_string('base_dir', None, 'Base experiment directory.')
 flags.DEFINE_string('data_dir', None, 'Data directory for the experiment.')
 flags.DEFINE_string('exp_name', 'lista_sc', 'The name of the experiment.')
 flags.DEFINE_integer('replicate', 1, 'The replicate id of the experiment.')
+flags.DEFINE_float('noise_std', 0.0, 'Noise std of the training data (metadata only, for profiling).')
 
 def build_model(A, D, N, M, alista_W=None):
   if FLAGS.model_name == 'lista':
@@ -430,6 +435,11 @@ def main(_):
   base_dir = FLAGS.base_dir
   data_dir = FLAGS.data_dir
   mode = 'test' if FLAGS.test else 'train'
+
+  sampler = gpu_mem_sampler.GpuMemSampler(interval_s=10.0)
+  sampler.start()
+  t_start = time.perf_counter()
+
   run(
     FLAGS.model_name,
     base_dir,
@@ -440,6 +450,44 @@ def main(_):
     epochs=FLAGS.epochs,
     mode=mode
   )
+
+  elapsed_s = round(time.perf_counter() - t_start, 2)
+  sampler.stop()
+
+  if mode == 'train':
+    mean_gpu_mb, median_gpu_mb, n_samples = sampler.stats()
+
+    m, n = None, None
+    try:
+      shape = np.load(os.path.join(data_dir, 'A.npy'), allow_pickle=True).shape
+      m, n = int(shape[0]), int(shape[1])
+    except Exception:
+      pass
+
+    profile = {
+      'timestamp': datetime.datetime.now().isoformat(),
+      'exp_name': FLAGS.exp_name,
+      'model_name': FLAGS.model_name,
+      'num_layers': FLAGS.num_layers,
+      'task': FLAGS.task,
+      'lasso_lam': FLAGS.lasso_lam,
+      'noise_std': FLAGS.noise_std,
+      'm': m,
+      'n': n,
+      'num_train_images': FLAGS.num_train_images,
+      'train_batch_size': FLAGS.train_batch_size,
+      'training_time_s': elapsed_s,
+      'gpu_mem_mean_mb': mean_gpu_mb,
+      'gpu_mem_median_mb': median_gpu_mb,
+      'gpu_mem_n_samples': n_samples,
+    }
+
+    profile_dir = os.path.join(os.path.abspath(base_dir), 'profiles')
+    os.makedirs(profile_dir, exist_ok=True)
+    profile_path = os.path.join(profile_dir, 'training_profiles.jsonl')
+    with open(profile_path, 'a') as f:
+      f.write(json.dumps(profile) + '\n')
+    logging.info('Profile saved to %s', profile_path)
 
 
 if __name__ == '__main__':

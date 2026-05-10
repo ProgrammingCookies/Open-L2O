@@ -74,7 +74,7 @@ def main(_):
         net_config = {"cw": {
             "net": "CoordinateWiseDeepLSTM",
             "net_options": {"layers": (20, 20)},
-            "net_path": FLAGS.path,
+            "net_path": os.path.join(FLAGS.path, "cw.l2l-0"),
         }}
         optimizer = meta_module.MetaOptimizer(**net_config)
         meta_result = optimizer.meta_loss(problem_fn, 1, net_assignments=None)
@@ -92,7 +92,7 @@ def main(_):
                 "scale": 0.01,
                 "tanh_output": True,
             },
-            "net_path": FLAGS.path,
+            "net_path": os.path.join(FLAGS.path, "rp.l2l-0"),
         }}
         optimizer = meta_module.MetaOptimizer(FLAGS.beta1, FLAGS.beta2,
                                               **net_config)

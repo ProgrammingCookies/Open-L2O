@@ -21,11 +21,16 @@ from __future__ import print_function
 import os
 import pickle
 import random
+import sys
 from timeit import default_timer as timer
 
 from six.moves import xrange
 from tensorflow.contrib.learn.python.learn import monitored_session as ms
 import tensorflow as tf
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+sys.path.insert(0, os.path.join(_REPO_ROOT, 'Model_Base_L2O'))
+import gpu_mem_sampler
 
 from data_generator import data_loader
 import meta_dm_train as meta
@@ -59,8 +64,14 @@ flags.DEFINE_float("mt_ratio", 0.3, "")
 flags.DEFINE_string("mt_ratios", "0.0 0.1 0.3 0.3 0.3 0.3 0.3 0.3", "")
 flags.DEFINE_integer("k", 1, "")
 
+flags.DEFINE_string("profile_dir", None, "Directory to append training_profiles.jsonl (optional).")
+
 
 def main(_):
+    sampler = gpu_mem_sampler.GpuMemSampler(interval_s=10.0)
+    sampler.start()
+    _t0 = timer()
+
     # Configuration.
     if FLAGS.if_cl:
         num_steps = [100, 200, 500, 1000, 1500, 2000, 2500, 3000]
@@ -73,7 +84,7 @@ def main(_):
     # Output path.
     if FLAGS.save_path is not None:
         if not os.path.exists(FLAGS.save_path):
-            os.mkdir(FLAGS.save_path)
+            os.makedirs(FLAGS.save_path)
 
     # Problem.
     problem, net_config, net_assignments = util.get_config(FLAGS.problem)
@@ -226,6 +237,13 @@ def main(_):
                     break
 
         print ("total time = {}s...".format(timer() - start_time))
+
+    elapsed_s = round(timer() - _t0, 2)
+    sampler.stop()
+
+    if FLAGS.profile_dir is not None and FLAGS.save_path is not None:
+        gpu_mem_sampler.save_l2o_profile(
+            FLAGS.profile_dir, FLAGS.save_path, sampler, elapsed_s, FLAGS.num_steps)
 
 
 if __name__ == "__main__":

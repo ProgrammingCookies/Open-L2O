@@ -97,7 +97,7 @@ def main(_):
 
     if FLAGS.output_path is not None:
         if not os.path.exists(FLAGS.output_path):
-            os.mkdir(FLAGS.output_path)
+            os.makedirs(FLAGS.output_path)
     output_file = '{}/{}_eval_loss_record.pickle-{}'.format(FLAGS.output_path, FLAGS.optimizer, FLAGS.problem)
     with open(output_file, 'wb') as l_record:
         pickle.dump(loss_record, l_record)
