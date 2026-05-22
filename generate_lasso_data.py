@@ -40,7 +40,7 @@ def generate_samples(A, num_samples, sparsity, noise_std, rng):
         x = np.zeros(N, dtype=np.float32)
         support = rng.choice(N, k, replace=False)
         x[support] = rng.randn(k).astype(np.float32)
-        y_clean = A @ x
+        y_clean = A @ x # shape (M,)
         if noise_std > 0:
             y = y_clean + (noise_std * rng.randn(M)).astype(np.float32)
             clean_data[i, :M] = y_clean

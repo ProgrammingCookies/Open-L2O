@@ -4,7 +4,7 @@
 # usage via gpu_mem_sampler into profiles/training_profiles.jsonl.
 #
 # Usage:
-#   bash scale_test_l2o.sh [options]
+#   bash scale_test_dm_rnn_enhanced.sh [options]
 #
 # Options:
 #   --lam      LASSO lambda              (default: 0.005)
@@ -12,8 +12,8 @@
 #   --mn_pairs Colon-separated M:N pairs (default: "5:10 25:50 50:100 100:200")
 #
 # Example:
-#   bash scale_test_l2o.sh
-#   bash scale_test_l2o.sh --mn_pairs "5:10 25:50"
+#   bash scale_test_dm_rnn_enhanced.sh
+#   bash scale_test_dm_rnn_enhanced.sh --mn_pairs "5:10 25:50"
 
 set -e
 
