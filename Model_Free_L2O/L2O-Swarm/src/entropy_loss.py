@@ -121,18 +121,9 @@ def self_loss (x, fx_array, n):
 
 if __name__ == "__main__":
 
-	x = tf.get_variable("x", [300,128, 2], dtype=tf.float32, initializer=tf.random_normal_initializer)
-	fx_array = tf.get_variable("y", [300, 128], dtype=tf.float32, initializer=tf.random_normal_initializer)
+	x = tf.random.normal([300, 128, 2])
+	fx_array = tf.random.normal([300, 128])
 
-	loss, t1, t2 = self_loss(x, fx_array, 300)
+	loss = self_loss(x, fx_array, 300)
 
-	print (loss.shape)
-
-	with tf.Session() as sess:
-
-		for i in range(20):
-			sess.run(tf.global_variables_initializer())
-			#tt1 = sess.run(t1)
-			#tt2 = sess.run(t2)
-			#print (np.max(tt1), np.min(tt2))
-			print (sess.run(t2))
+	print(loss.shape)

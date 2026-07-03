@@ -1,92 +1,100 @@
+"""Learning to optimize in swarms — evaluation."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-from six.moves import xrange
-import tensorflow as tf
-
-from tensorflow.contrib.learn.python.learn import monitored_session as ms
-
-import meta
-import util
+import argparse
+import logging
 import os
 import pickle
-import pdb
-flags = tf.flags
-logging = tf.logging
+from timeit import default_timer as timer
+
+import tensorflow as tf
+
+import meta
+import networks
+import util
 
 
-FLAGS = flags.FLAGS
-flags.DEFINE_string("optimizer", "L2L", "Optimizer.")
-flags.DEFINE_string("path", None, "Path to saved meta-optimizer network.")
-flags.DEFINE_integer("num_epochs", 10, "Number of evaluation epochs.")
-flags.DEFINE_integer("seed", None, "Seed for TensorFlow's RNG.")
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--optimizer", default="L2L", choices=["L2L", "Adam"])
+    p.add_argument("--path", default=None, help="Path to saved meta-optimizer network.")
+    p.add_argument("--num_epochs", type=int, default=10)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--problem", default="simple")
+    p.add_argument("--num_steps", type=int, default=100)
+    p.add_argument("--learning_rate", type=float, default=0.001)
+    return p.parse_args()
 
-flags.DEFINE_string("problem", "simple", "Type of problem.")
-flags.DEFINE_integer("num_steps", 100,
-                     "Number of optimization steps per epoch.")
-flags.DEFINE_float("learning_rate", 0.001, "Learning rate.")
 
-def main(_):
-  # Configuration.
-  num_unrolls = FLAGS.num_steps
+def main():
+    FLAGS = parse_args()
 
-  if FLAGS.seed:
-    tf.set_random_seed(FLAGS.seed)
+    if FLAGS.seed is not None:
+        tf.random.set_seed(FLAGS.seed)
 
-  # Problem.
-  problem, net_config, net_assignments = util.get_config(FLAGS.problem,
-                                                         FLAGS.path)
+    problem, net_config, net_assignments = util.get_config(FLAGS.problem)
 
-  # Optimizer setup.
-  if FLAGS.optimizer == "Adam":
-    cost_op = problem()
-    problem_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-    problem_reset = tf.variables_initializer(problem_vars)
-
-    optimizer = tf.train.AdamOptimizer(FLAGS.learning_rate)
-    optimizer_reset = tf.variables_initializer(optimizer.get_slot_names())
-    update = optimizer.minimize(cost_op)
-    reset = [problem_reset, optimizer_reset]
-  elif FLAGS.optimizer == "L2L":
-    if FLAGS.path is None:
-      logging.warning("Evaluating untrained L2L optimizer")
-    optimizer = meta.MetaOptimizer(**net_config)
-    meta_loss = optimizer.meta_loss(problem, 1, net_assignments=net_assignments, model_path = FLAGS.path)
-    loss, update, reset, cost_op, x_final, constant = meta_loss
-  else:
-    raise ValueError("{} is not a valid optimizer".format(FLAGS.optimizer))
-  with ms.MonitoredSession() as sess:
-    # Prevent accidental changes to the graph.
-    tf.get_default_graph().finalize()
+    total_time = 0.0
+    total_cost = 0.0
     min_loss_record = []
     all_time_loss_record = []
-    total_time = 0
-    total_cost = 0
-#    pdb.set_trace()
-#    print(constant)
-    x_record = [[sess.run(item) for item in x_final]]
-    for _ in xrange(FLAGS.num_epochs):
-      # Training.
-      time, cost,  constants = util.eval_run_epoch(sess, cost_op, [update], reset,
-                                  num_unrolls, x_final, constant)
-      total_time += time
-      total_cost += min(cost)
-      all_time_loss_record.append(cost)
-      min_loss_record.append(min(cost))
-#      pdb.set_trace
-#      print(x_finals)
-      #x_record = x_record + x_finals
-    with open('./{}/evaluate_record.pickle'.format(FLAGS.path),'wb') as l_record:
-      record = {'all_time_loss_record':all_time_loss_record,'min_loss_record':min_loss_record,\
-                'constants':[sess.run(item) for item in constants],\
-                }
-      pickle.dump(record, l_record)
-    # Results.
-    util.print_stats("Epoch {}".format(FLAGS.num_epochs), total_cost,
-                     total_time, FLAGS.num_epochs)
+
+    if FLAGS.optimizer == "Adam":
+        for _ in range(FLAGS.num_epochs):
+            start = timer()
+            x_vars, const_vars, loss_fn = problem()
+            adam = tf.keras.optimizers.Adam(FLAGS.learning_rate)
+            costs = []
+            for _ in range(FLAGS.num_steps):
+                with tf.GradientTape() as tape:
+                    loss = tf.reduce_mean(loss_fn(x_vars))
+                grads = tape.gradient(loss, x_vars)
+                adam.apply_gradients(zip(grads, x_vars))
+                costs.append(float(loss))
+            all_time_loss_record.append(costs)
+            min_loss_record.append(min(costs))
+            total_time += timer() - start
+            total_cost += min(costs)
+
+    elif FLAGS.optimizer == "L2L":
+        if FLAGS.path is None:
+            logging.warning("Evaluating untrained L2L optimizer")
+
+        optimizer = meta.MetaOptimizer(**net_config)
+        optimizer.setup(problem, net_assignments=net_assignments, model_path=FLAGS.path)
+
+        if FLAGS.path is not None:
+            # Trigger a dummy step to build the network's weights, then load the
+            # saved ones (Keras layers build lazily on first call).
+            optimizer.unroll_step(1)
+            for net in optimizer._nets.values():
+                filename = os.path.join(FLAGS.path, "cw.l2l")
+                if os.path.exists(filename):
+                    networks.load(net, filename)
+
+        for _ in range(FLAGS.num_epochs):
+            start = timer()
+            optimizer.reset_state()
+            costs = []
+            for _ in range(FLAGS.num_steps):
+                _, fx_final = optimizer.unroll_step(1)
+                costs.append(sum(float(v) for v in fx_final) / len(fx_final))
+            all_time_loss_record.append(costs)
+            min_loss_record.append(min(costs))
+            total_time += timer() - start
+            total_cost += min(costs)
+    else:
+        raise ValueError("{} is not a valid optimizer".format(FLAGS.optimizer))
+
+    if FLAGS.path is not None:
+        with open("./{}/evaluate_record.pickle".format(FLAGS.path), "wb") as l_record:
+            record = {
+                "all_time_loss_record": all_time_loss_record,
+                "min_loss_record": min_loss_record,
+            }
+            pickle.dump(record, l_record)
+
+    util.print_stats("Epoch {}".format(FLAGS.num_epochs), total_cost, total_time, FLAGS.num_epochs)
 
 
 if __name__ == "__main__":
-  tf.app.run()
+    main()
