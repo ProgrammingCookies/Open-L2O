@@ -1,63 +1,65 @@
-## L2O-Scale and its Enhanced Versions
+## L2O-Scale
+
+### Overview
+
+Learned optimizers from "Learned Optimizers that Scale and Generalize" (Wichrowska et al., 2017): a hierarchical RNN (`HierarchicalRNN`) that maintains per-parameter, per-tensor, and global recurrent state to propose optimizee parameter updates, plus a simpler `CoordinatewiseRNN` and a handful of minimal reference optimizers (`GlobalLearningRate`, `LearningRateSchedule`, `TrainableAdam`).
+
+This directory unifies what used to be two separate `L2O-Scale-Training/` and `L2O-Scale-Evaluation/` trees (now migrated to TF2/Keras 3 — see `migration_changes.txt`).
 
 ### Code Overview
 
-In the top-level directory, ```metaopt.py``` contains the code to train and test a learned optimizer. ```metarun.py``` packages the actual training procedure into a single file, defining and exposing many flags to tune the procedure, from selecting the optimizer type and problem set to more fine-grained hyperparameter settings.
-
-There is no testing binary; testing can be done ad-hoc via ```metaopt.test_optimizer``` by passing an optimizer object and a directory with a checkpoint.
-
-The ```optimizer``` directory contains a base ```trainable_optimizer.py``` class and a number of extensions, including the ```hierarchical_rnn``` optimizer used in the paper, a ```coordinatewise_rnn``` optimizer that more closely matches previous work, and a number of simpler optimizers to demonstrate the basic mechanics of
-a learnable optimizer.
-
-The ```problems``` directory contains the code to build the problems that were used in the meta-training set.
-
-The ```metarun.py``` is used to meta-train a learnable optimizer.
-
-### Command-Line Flags
-
-The flags most relevant to meta-training are defined in ```metarun.py```. The default values will meta-train a HierarchicalRNN optimizer with the hyperparameter settings used in the paper.
-
-### Using a Learned Optimizer as a Black Box
-
-The ```trainable_optimizer``` inherits from ```tf.train.Optimizer```, so a properly instantiated version can be used to train any model in any APIs that accept this class. There are just 2 caveats:
-
-1. If using the Hierarchical RNN optimizer, the apply_gradients return type must be changed (see comments inline for what exactly must be removed)
-2. Care must be taken to restore the variables from the optimizer without overriding them. Optimizer variables should be loaded manually using a pretrained checkpoint
-   and a ```tf.train.Saver``` with only the optimizer variables. Then, when constructing the session, ensure that any automatic variable initialization does not
-   re-initialize the loaded optimizer variables.
+- `optimizer/` — `trainable_optimizer.py` (base class), `hierarchical_rnn.py`, `coordinatewise_rnn.py`, `global_learning_rate.py`, `learning_rate_schedule.py`, `trainable_adam.py`, `rnn_cells.py` (custom `BiasGRUCell`), `utils.py`.
+- `problems/` — `problem_generator.py` (the problem catalog: Quadratic, classic 2D test functions, MNIST/CIFAR-10 classifiers, and various composite/wrapper problems), `problem_sets.py` (named collections used by `train.py`/`evaluate.py`), `datasets.py`, `problem_spec.py`.
+- `metaopt.py` — `train_optimizer()` (the meta-training loop) and `test_optimizer()`/`run_wall_clock_test()` (apply an optimizer, trained or baseline, as a standalone drop-in optimizer against a fresh problem).
+- `train.py` — meta-training entry point (was `metarun.py`).
+- `evaluate.py` — evaluation entry point (was `metatest.py`).
 
 ### Environment
 
-* Bazel ([install](https://bazel.build/versions/master/docs/install.html))
-* TensorFlow >= v1.3
+- TensorFlow >= 2.10, Keras 3 (`pip install -r requirements.txt`)
 
-### Experiments on L2O-Scale
-
-#### Train L2O-Scale
+### Train
 
 ```shell
-cd L2O-Scale-Training
-
-python metarun.py --train_dir=hess_cl_mt --regularize_time=none --alpha=1e-4 --reg_optimizer=True --reg_option=hessian-esd --include_mnist_mlp_problems --num_problems=1 --num_meta_iterations=100 --fix_unroll=True --fix_unroll_length=20 --evaluation_period=1 --evaluation_epochs=5 --use_second_derivatives=False --if_cl=False --if_mt=False --mt_ratio=0.1 --mt_k=1
+python train.py --train_dir=runs --optimizer=HierarchicalRNN \
+    --include_quadratic_problems --include_bowl_problems \
+    --num_problems=1 --num_meta_iterations=100 \
+    --fix_unroll --fix_unroll_length=20 --fix_num_steps=100 \
+    --evaluation_period=1 --evaluation_epochs=5
 ```
 
-#### Train L2O-Scale (enhanced)
+Checkpoints are written to `<train_dir>/<optimizer>_<cell_cls>_<cell_size>_<num_cells>/` as `model-best.l2o` (best-so-far by evaluation cost), `model-iter<k>.l2o` (periodic), and `model-final.l2o`.
+
+### Evaluate
 
 ```shell
-cd L2O-Scale-Training
-
-python metarun.py --train_dir=hess_cl_mt --regularize_time=none --alpha=1e-4 --reg_optimizer=True --reg_option=hessian-esd --include_mnist_mlp_problems --num_problems=1 --num_meta_iterations=100 --fix_unroll=True --fix_unroll_length=20 --evaluation_period=1 --evaluation_epochs=5 --use_second_derivatives=False --if_cl=True --if_mt=True --mt_ratio=0.1 --mt_k=1
+python evaluate.py --train_dir=runs --optimizer=HierarchicalRNN \
+    --save_dir=runs_eval --include_mnist_mlp_problems \
+    --restore_model_name=model-final.l2o --num_testing_itrs=10000
 ```
 
-#### Evaluation with L2O-Scale
+`--test_optimizer` also accepts `SGD`/`Adam`/`Adagrad` for a plain baseline (no checkpoint needed). Results are written to `<save_dir>/seed<N>_eval_loss_record.pickle-<model_name>` for 5 fixed seeds (6, 12, 18, 24, 30).
 
-```shell
-cd L2O-Scale-Evaluation
+### Using a Learned Optimizer as a Drop-in Optimizer
 
-python metatest.py --train_dir=../l2o-scale-regularize-train/hess_cl_mt --save_dir=hess_cl_mt_eval --include_mnist_mlp_relu_problems --model_name=mnist-relu --restore_model_name=model.ckpt-0 --num_testing_itrs=10000
+Any `TrainableOptimizer` subclass exposes a plain `apply_gradients(grads_and_vars)` method (the same calling convention as `tf.keras.optimizers.Optimizer.apply_gradients`), so a trained instance can drive optimization of any model built with real `tf.Variable`s:
+
+```python
+opt = hierarchical_rnn.HierarchicalRNN([10, 20, 20])
+# force weights to build (see migration_changes.txt), then:
+opt.load("runs/HierarchicalRNN_GRUCell_20_2/model-final.l2o")
+opt.apply_gradients(zip(gradients, variables))
 ```
 
-Remarks.
+### Citation
 
-- You can modify --model_name and --include_mnist_conv_problem --include_cifar10_conv_problems --include_mnist_mlp_deeper_problems --include_mnist_mlp_problems for different problems
-- You can change metatest.py line 473 for different random seeds
+```
+@inproceedings{wichrowska2017learned,
+  title={Learned optimizers that scale and generalize},
+  author={Wichrowska, Olga and Maheswaranathan, Niru and Hoffman, Matthew W and Colmenarejo, Sergio Gomez and Denil, Misha and Freitas, Nando and Sohl-Dickstein, Jascha},
+  booktitle={International Conference on Machine Learning},
+  pages={3751--3760},
+  year={2017},
+  organization={PMLR}
+}
+```
