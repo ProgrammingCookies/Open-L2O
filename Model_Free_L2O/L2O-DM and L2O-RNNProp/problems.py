@@ -10,986 +10,657 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# limitations under the License
+# limitations under the License.
 # ==============================================================================
-"""Learning 2 Learn problems."""
+"""Learning 2 Learn problems.
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+Each problem factory returns a `build` callable.  Calling `build()` creates
+fresh tf.Variable objects and returns:
+    (x_vars, const_vars, loss_fn)
+where
+    x_vars    — list of trainable tf.Variable (the optimizee parameters)
+    const_vars — list of non-trainable tf.Variable (fixed per episode)
+    loss_fn   — callable loss_fn(x_tensors) -> scalar loss
+"""
 
 import os
-import numpy as np
-import tarfile
 import sys
+import tarfile
 
-from six.moves import urllib
-from six.moves import xrange  # pylint: disable=redefined-builtin
-import sonnet as snt
+import numpy as np
 import tensorflow as tf
-import pdb
-from tensorflow.contrib.learn.python.learn.datasets import mnist as mnist_dataset
-from vgg16 import VGG16
 import tensorflow_probability as tfp
+
 tfd = tfp.distributions
 
-_nn_initializers = {
-    "w": tf.random_normal_initializer(mean=0, stddev=0.01),
-    "b": tf.random_normal_initializer(mean=0, stddev=0.01),
-}
+_CIFAR10_URL = "https://www.cs.toronto.edu/~kriz"
+_CIFAR10_FILE = "cifar-10-python.tar.gz"
+_CIFAR10_FOLDER = "cifar-10-batches-py"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _xent_loss(output, labels):
+    loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=output, labels=labels)
+    return tf.reduce_mean(loss)
+
+
+def _load_mnist(mode="train"):
+    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+    if mode == "train":
+        images, labels = x_train, y_train
+    else:
+        images, labels = x_test, y_test
+    images = images.reshape(-1, 784).astype(np.float32) / 255.0
+    labels = labels.astype(np.int64)
+    return images, labels
+
+
+def _load_cifar10(mode="train"):
+    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+    if mode == "train":
+        images, labels = x_train, y_train
+    else:
+        images, labels = x_test, y_test
+    images = images.astype(np.float32) / 255.0          # [N, 32, 32, 3]
+    labels = labels.reshape(-1).astype(np.int64)        # [N]
+    return images, labels
+
+
+# ---------------------------------------------------------------------------
+# Simple problems
+# ---------------------------------------------------------------------------
 
 def simple():
-  """Simple problem: f(x) = x^2."""
+    """f(x) = x^2."""
+    def build():
+        x = tf.Variable(tf.ones([]), name="x", dtype=tf.float32)
 
-  def build():
-    """Builds loss graph."""
-    x = tf.get_variable(
-        "x",
-        shape=[],
-        dtype=tf.float32,
-        initializer=tf.ones_initializer())
-    return tf.square(x, name="x_squared")
+        def loss_fn(x_tensors):
+            return tf.square(x_tensors[0])
 
-  return build
+        return [x], [], loss_fn
+    return build
 
 
 def simple_multi_optimizer(num_dims=2):
-  """Multidimensional simple problem."""
+    """Multi-dimensional f(x) = sum(x_i^2)."""
+    def build():
+        x_vars = [tf.Variable(tf.ones([]), name="x_{}".format(i), dtype=tf.float32)
+                  for i in range(num_dims)]
 
-  def get_coordinate(i):
-    return tf.get_variable("x_{}".format(i),
-                           shape=[],
-                           dtype=tf.float32,
-                           initializer=tf.ones_initializer())
+        def loss_fn(x_tensors):
+            x = tf.stack(x_tensors)
+            return tf.reduce_sum(tf.square(x))
 
-  def build():
-    coordinates = [get_coordinate(i) for i in xrange(num_dims)]
-    x = tf.concat([tf.expand_dims(c, 0) for c in coordinates], 0)
-    return tf.reduce_sum(tf.square(x, name="x_squared"))
-
-  return build
+        return x_vars, [], loss_fn
+    return build
 
 
 def quadratic(batch_size=128, num_dims=10, stddev=0.01, dtype=tf.float32):
-  """Quadratic problem: f(x) = ||Wx - y||."""
+    """f(x) = ||Wx - y||^2."""
+    def build():
+        x = tf.Variable(
+            tf.random.normal([batch_size, num_dims], stddev=stddev, dtype=dtype), name="x")
+        w = tf.Variable(
+            tf.random.uniform([batch_size, num_dims, num_dims], dtype=dtype),
+            trainable=False, name="w")
+        y = tf.Variable(
+            tf.random.uniform([batch_size, num_dims], dtype=dtype),
+            trainable=False, name="y")
 
-  def build():
-    """Builds loss graph."""
+        def loss_fn(x_tensors):
+            x_t = x_tensors[0]
+            product = tf.squeeze(tf.matmul(w, tf.expand_dims(x_t, -1)))
+            return tf.reduce_mean(tf.reduce_sum((product - y) ** 2, 1))
 
-    # Trainable variable.
-    x = tf.get_variable(
-        "x",
-        shape=[batch_size, num_dims],
-        dtype=dtype,
-        initializer=tf.random_normal_initializer(stddev=stddev))
+        return [x], [w, y], loss_fn
+    return build
 
-    # Non-trainable variables.
-    w = tf.get_variable("w",
-                        shape=[batch_size, num_dims, num_dims],
-                        dtype=dtype,
-                        initializer=tf.random_uniform_initializer(),
-                        trainable=False)
-    y = tf.get_variable("y",
-                        shape=[batch_size, num_dims],
-                        dtype=dtype,
-                        initializer=tf.random_uniform_initializer(),
-                        trainable=False)
-
-    product = tf.squeeze(tf.matmul(w, tf.expand_dims(x, -1)))
-    return tf.reduce_mean(tf.reduce_sum((product - y) ** 2, 1))
-
-  return build
 
 def lasso(batch_size=128, num_dims=10, stddev=0.01, l=0.005, dtype=tf.float32):
-  """lasso problem: f(x) = 0.5*||Wx - y||2 + lamada *||x||1."""
+    """f(x) = 0.5*||Wx - y||^2 + lambda*||x||_1."""
+    def build():
+        x = tf.Variable(
+            tf.random.normal([batch_size, num_dims], stddev=stddev, dtype=dtype), name="x")
+        w = tf.Variable(
+            tf.random.uniform([batch_size, num_dims, num_dims], dtype=dtype),
+            trainable=False, name="w")
+        y = tf.Variable(
+            tf.random.uniform([batch_size, num_dims, 1], dtype=dtype),
+            trainable=False, name="y")
 
-  def build():
-    """Builds loss graph."""
+        def loss_fn(x_tensors):
+            x_t = x_tensors[0]
+            product = tf.matmul(w, tf.expand_dims(x_t, -1))
+            left_term = 0.5 * tf.reduce_sum((product - y) ** 2, 1)
+            other_term = l * tf.norm(x_t, ord=1, axis=1, keepdims=True)
+            return tf.reduce_mean(left_term + other_term)
 
-    # Trainable variable.
-    x = tf.get_variable(
-        "x",
-        shape=[batch_size, num_dims],
-        dtype=dtype,
-        initializer=tf.random_normal_initializer(stddev=stddev))
-
-    # Non-trainable variables.
-    w = tf.get_variable("w",
-                        shape=[batch_size, num_dims, num_dims],
-                        dtype=dtype,
-                        initializer=tf.random_uniform_initializer(),
-                        trainable=False)
-    y = tf.get_variable("y",
-                        shape=[batch_size, num_dims, 1],
-                        dtype=dtype,
-                        initializer=tf.random_uniform_initializer(),
-                        trainable=False)
-
-    product = tf.matmul(w, tf.expand_dims(x, -1))
-    left_term = 0.5 * tf.reduce_sum((product - y) ** 2, 1)
-    other_term = l * tf.norm(x, ord=1, axis=1, keepdims=True)
-    result = tf.reduce_mean(left_term + other_term)
-    return result
-
-  return build
+        return [x], [w, y], loss_fn
+    return build
 
 
 def lasso_fixed(data_A, data_b, stddev=0.01, l=0.005, dtype=tf.float32):
-  """lasso problem: f(x) = 0.5*||Wx - y||2 + lamada *||x||1."""
-  a = data_A
-  b = data_b
+    """Lasso with fixed A and b matrices."""
+    a = data_A
+    b = data_b
+    print("=" * 100)
+    print("LASSO: A_size={} b_size={}".format(a.shape, b.shape))
+    print("=" * 100)
 
-  print("=" * 100)
-  print("LASSO: A_size={} b_size={}".format(a.shape, b.shape))
-  print("=" * 100)
-  def build():
-    """Builds loss graph."""
+    w_const = tf.constant(a, dtype=dtype)
+    y_const = tf.constant(b, dtype=dtype)
 
-    # Trainable variable.
-    x = tf.get_variable(
-        "x",
-        shape=[a.shape[0], a.shape[2]],
-        dtype=dtype,
-        initializer=tf.random_normal_initializer(stddev=stddev))
+    def build():
+        x = tf.Variable(
+            tf.random.normal([a.shape[0], a.shape[2]], stddev=stddev, dtype=dtype), name="x")
 
-    # Non-trainable variables.
-    w = tf.get_variable("w",
-                        shape=a.shape,
-                        dtype=dtype,
-                        initializer=tf.constant_initializer(a),
-                        trainable=False)
-    y = tf.get_variable("y",
-                        shape=b.shape,
-                        dtype=dtype,
-                        initializer=tf.constant_initializer(b),
-                        trainable=False)
+        def loss_fn(x_tensors):
+            x_t = x_tensors[0]
+            product = tf.matmul(w_const, tf.expand_dims(x_t, -1))
+            left_term = 0.5 * tf.reduce_sum((product - y_const) ** 2, 1)
+            other_term = l * tf.norm(x_t, ord=1, axis=1, keepdims=True)
+            return tf.reduce_mean(left_term + other_term)
 
-    # product = tf.squeeze(tf.matmul(w, tf.expand_dims(x, -1)))
-    
-    product = tf.matmul(w, tf.expand_dims(x, -1))
-    left_term = 0.5 * tf.reduce_sum((product - y) ** 2, 1)
-    other_term = l * tf.norm(x, ord=1, axis=1, keepdims=True)
-    result = tf.reduce_mean(left_term + other_term)
-    return result
+        return [x], [], loss_fn
+    return build
 
-  return build
 
 def rastrigin(batch_size=128, num_dims=10, alpha=10, stddev=1, dtype=tf.float32):
-  
-  def build():
-    """Builds loss graph."""
-    # Trainable variable.
-    x = tf.get_variable(
-        "x",
-        shape=[batch_size, num_dims, 1],
-        dtype=dtype,
-        initializer=tf.random_normal_initializer(stddev=stddev)
-    )
+    def build():
+        x = tf.Variable(
+            tf.random.normal([batch_size, num_dims, 1], stddev=stddev, dtype=dtype), name="x")
+        A = tf.Variable(
+            tf.random.normal([batch_size, num_dims, num_dims], stddev=stddev, dtype=dtype),
+            trainable=False, name="A")
+        B = tf.Variable(
+            tf.random.normal([batch_size, num_dims, 1], stddev=stddev, dtype=dtype),
+            trainable=False, name="B")
+        C = tf.Variable(
+            tf.random.normal([batch_size, num_dims, 1], stddev=stddev, dtype=dtype),
+            trainable=False, name="C")
 
-    # Non-trainable variables.
-    A = tf.get_variable("A",
-                        dtype=dtype,
-                        shape=[batch_size, num_dims, num_dims],
-                        initializer=tf.random_normal_initializer(stddev=stddev),
-                        trainable=False)
-    B = tf.get_variable("B",
-                        dtype=dtype,
-                        shape=[batch_size, num_dims, 1],
-                        initializer=tf.random_normal_initializer(stddev=stddev),
-                        trainable=False)
-    C = tf.get_variable("C",
-                        dtype=dtype,
-                        shape=[batch_size, num_dims, 1],
-                        initializer=tf.random_normal_initializer(stddev=stddev),
-                        trainable=False)
+        def loss_fn(x_tensors):
+            x_t = x_tensors[0]
+            product = tf.matmul(A, x_t)
+            ras_norm = tf.norm(product - B, ord=2, axis=[-2, -1])
+            cqTcos = tf.squeeze(
+                tf.matmul(tf.transpose(C, perm=[0, 2, 1]), tf.cos(2 * np.pi * x_t)))
+            return tf.reduce_mean(0.5 * (ras_norm ** 2) - alpha * cqTcos + alpha * num_dims)
 
-    product = tf.matmul(A, x)
-    ras_norm=tf.norm(product-B,ord=2,axis=[-2,-1])
-    
-    cqTcos=tf.squeeze(tf.matmul(tf.transpose(C,perm=[0,2,1]),tf.cos(2*np.pi*x)))
+        return [x], [A, B, C], loss_fn
+    return build
 
-    return tf.reduce_mean(0.5*(ras_norm**2)-alpha*cqTcos+alpha*num_dims)
 
-  return build
+def square_cos(batch_size=128, num_dims=10, stddev=0.01, dtype=tf.float32):
+    def build():
+        x = tf.Variable(
+            tf.random.normal([batch_size, num_dims], stddev=stddev, dtype=dtype), name="x")
+        w = tf.Variable(
+            tf.random.uniform([batch_size, num_dims, num_dims], dtype=dtype),
+            trainable=False, name="w")
+        y = tf.Variable(
+            tf.random.uniform([batch_size, num_dims], dtype=dtype),
+            trainable=False, name="y")
+        wcos = tf.Variable(
+            tf.random.uniform([batch_size, num_dims, num_dims], dtype=dtype),
+            trainable=False, name="wcos")
+
+        def loss_fn(x_tensors):
+            x_t = x_tensors[0]
+            product = tf.squeeze(tf.matmul(w, tf.expand_dims(x_t, -1)))
+            product2 = tf.squeeze(
+                tf.matmul(wcos, tf.expand_dims(10 * tf.math.cos(2 * 3.1415926 * x_t), -1)))
+            product3 = (tf.reduce_sum((product - y) ** 2, 1)
+                        - tf.reduce_sum(product2, 1)
+                        + 10 * num_dims)
+            return tf.reduce_mean(product3)
+
+        return [x], [w, y, wcos], loss_fn
+    return build
+
 
 def ensemble(problems, weights=None):
-  """Ensemble of problems.
+    """Weighted sum of multiple problems."""
+    if weights and len(weights) != len(problems):
+        raise ValueError("len(weights) != len(problems)")
 
-  Args:
-    problems: List of problems. Each problem is specified by a dict containing
-        the keys 'name' and 'options'.
-    weights: Optional list of weights for each problem.
-
-  Returns:
-    Sum of (weighted) losses.
-
-  Raises:
-    ValueError: If weights has an incorrect length.
-  """
-  if weights and len(weights) != len(problems):
-    raise ValueError("len(weights) != len(problems)")
-
-  build_fns = [getattr(sys.modules[__name__], p["name"])(**p["options"])
-               for p in problems]
-
-  def build():
-    loss = 0
-    for i, build_fn in enumerate(build_fns):
-      with tf.variable_scope("problem_{}".format(i)):
-        loss_p = build_fn()
-        if weights:
-          loss_p *= weights[i]
-        loss += loss_p
-    return loss
-
-  return build
-
-
-def _xent_loss(output, labels):
-  loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=output,
-                                                        labels=labels)
-  return tf.reduce_mean(loss)
-
-
-def mnist(layers,
-          activation="sigmoid",
-          batch_size=128,
-          mode="train"):
-  """Mnist classification with a multi-layer perceptron."""
-  initializers = _nn_initializers
-
-  if activation == "sigmoid":
-    activation_op = tf.sigmoid
-  elif activation == "relu":
-    activation_op = tf.nn.relu
-  else:
-    raise ValueError("{} activation not supported".format(activation))
-
-  # Data.
-  data = mnist_dataset.load_mnist()
-  data = getattr(data, mode)
-  images = tf.constant(data.images, dtype=tf.float32, name="MNIST_images")
-  images = tf.reshape(images, [-1, 28, 28, 1])
-  labels = tf.constant(data.labels, dtype=tf.int64, name="MNIST_labels")
-
-  # Network.
-  mlp = snt.nets.MLP(list(layers) + [10],
-                     activation=activation_op,
-                     initializers=initializers)
-  network = snt.Sequential([snt.BatchFlatten(), mlp])
-
-  def build():
-    indices = tf.random_uniform([batch_size], 0, data.num_examples, tf.int64)
-    batch_images = tf.gather(images, indices)
-    batch_labels = tf.gather(labels, indices)
-    output = network(batch_images)
-    return _xent_loss(output, batch_labels)
-
-  return build
-
-
-def mnist_conv(batch_norm=True,
-               batch_size=128,
-               mode="train"):
-
-  # Data.
-  data = mnist_dataset.load_mnist()
-  data = getattr(data, mode)
-  images = tf.constant(data.images, dtype=tf.float32, name="MNIST_images")
-  images = tf.reshape(images, [-1, 28, 28, 1])
-  labels = tf.constant(data.labels, dtype=tf.int64, name="MNIST_labels")
-
-  def network(inputs, training=True):
-
-      def _conv_activation(x):
-          return tf.nn.max_pool(tf.nn.relu(x),
-                                ksize=[1, 2, 2, 1],
-                                strides=[1, 2, 2, 1],
-                                padding="VALID")
-      def conv_layer(inputs, strides, c_h, c_w, output_channels, padding, name):
-          n_channels = int(inputs.get_shape()[-1])
-          with tf.variable_scope(name) as scope:
-              kernel1 = tf.get_variable('weights1',
-                                        shape=[c_h, c_w, n_channels, output_channels],
-                                        dtype=tf.float32,
-                                        initializer=tf.random_normal_initializer(stddev=0.01)
-                                        )
-              
-              biases1 = tf.get_variable('biases1', [output_channels], initializer=tf.constant_initializer(0.0))
-          inputs = tf.nn.conv2d(inputs, kernel1, [1, strides, strides, 1], padding)
-          inputs = tf.nn.bias_add(inputs, biases1)
-          if batch_norm:
-              inputs = tf.layers.batch_normalization(inputs, training=training)
-          inputs = _conv_activation(inputs)
-          return inputs
-
-      inputs = conv_layer(inputs, 1, 3, 3, 16, "VALID", 'conv_layer1')
-      inputs = conv_layer(inputs, 1, 5, 5, 32, "VALID", 'conv_layer2')
-      inputs = tf.reshape(inputs, [batch_size, -1])
-      fc_shape2 = int(inputs.get_shape()[1])
-      weights = tf.get_variable("fc_weights",
-                                shape=[fc_shape2, 10],
-                                dtype=tf.float32,
-                                initializer=tf.random_normal_initializer(stddev=0.01))
-      bias = tf.get_variable("fc_bias",
-                             shape=[10, ],
-                             dtype=tf.float32,
-                             initializer=tf.constant_initializer(0.0))
-      return tf.nn.relu(tf.nn.bias_add(tf.matmul(inputs, weights), bias))
-
-  def build():
-    indices = tf.random_uniform([batch_size], 0, data.num_examples, tf.int64)
-    batch_images = tf.gather(images, indices)
-    batch_labels = tf.gather(labels, indices)
-    output = network(batch_images)
-    return _xent_loss(output, batch_labels)
-
-  return build
-
-
-CIFAR10_URL = "http://www.cs.toronto.edu/~kriz"
-CIFAR10_FILE = "cifar-10-binary.tar.gz"
-CIFAR10_FOLDER = "cifar-10-batches-bin"
-
-
-def _maybe_download_cifar10(path):
-  """Download and extract the tarball from Alex's website."""
-  if not os.path.exists(path):
-    os.makedirs(path)
-  filepath = os.path.join(path, CIFAR10_FILE)
-  if not os.path.exists(filepath):
-    print("Downloading CIFAR10 dataset to {}".format(filepath))
-    url = os.path.join(CIFAR10_URL, CIFAR10_FILE)
-    filepath, _ = urllib.request.urlretrieve(url, filepath)
-    statinfo = os.stat(filepath)
-    print("Successfully downloaded {} bytes".format(statinfo.st_size))
-    tarfile.open(filepath, "r:gz").extractall(path)
-
-
-def cifar10(path,
-            batch_norm=True,
-            batch_size=128,
-            num_threads=4,
-            min_queue_examples=1000,
-            mode="train"):
-  """Cifar10 classification with a convolutional network."""
-
-  # Data.
-  _maybe_download_cifar10(path)
-  if mode == "train":
-    filenames = [os.path.join(path, CIFAR10_FOLDER, "data_batch_{}.bin".format(i)) for i in xrange(1, 6)]
-  elif mode == "test":
-    filenames = [os.path.join(path, CIFAR10_FOLDER, "test_batch.bin")]
-  else:
-    raise ValueError("Mode {} not recognised".format(mode))
-
-  depth = 3
-  height = 32
-  width = 32
-  label_bytes = 1
-  image_bytes = depth * height * width
-  record_bytes = label_bytes + image_bytes
-  reader = tf.FixedLengthRecordReader(record_bytes=record_bytes)
-  _, record = reader.read(tf.train.string_input_producer(filenames))
-  record_bytes = tf.decode_raw(record, tf.uint8)
-
-  label = tf.cast(tf.slice(record_bytes, [0], [label_bytes]), tf.int32)
-  raw_image = tf.slice(record_bytes, [label_bytes], [image_bytes])
-  image = tf.cast(tf.reshape(raw_image, [depth, height, width]), tf.float32)
-  # height x width x depth.
-  image = tf.transpose(image, [1, 2, 0])
-  image = tf.math.divide(image, 255)
-
-  queue = tf.RandomShuffleQueue(capacity=min_queue_examples + 3 * batch_size,
-                                min_after_dequeue=min_queue_examples,
-                                dtypes=[tf.float32, tf.int32],
-                                shapes=[image.get_shape(), label.get_shape()])
-  enqueue_ops = [queue.enqueue([image, label]) for _ in xrange(num_threads)]
-  tf.train.add_queue_runner(tf.train.QueueRunner(queue, enqueue_ops))
-
-  def network(inputs, training=True):
-
-      def _conv_activation(x):
-          return tf.nn.max_pool(tf.nn.relu(x),
-                                ksize=[1, 2, 2, 1],
-                                strides=[1, 2, 2, 1],
-                                padding="VALID")
-    
-      def conv_layer(inputs, strides, c_h, c_w, output_channels, padding, name):
-          n_channels = int(inputs.get_shape()[-1])
-          with tf.variable_scope(name) as scope:
-              kernel1 = tf.get_variable('weights1',
-                                        shape=[c_h, c_w, n_channels, output_channels],
-                                        dtype=tf.float32,
-                                        initializer=tf.random_normal_initializer(stddev=0.01)
-                                        )
-            
-              biases1 = tf.get_variable('biases1', [output_channels], initializer=tf.constant_initializer(0.0))
-          inputs = tf.nn.conv2d(inputs, kernel1, [1, strides, strides, 1], padding)
-          inputs = tf.nn.bias_add(inputs, biases1)
-          if batch_norm:
-              inputs = tf.layers.batch_normalization(inputs, training=training)
-          inputs = _conv_activation(inputs)
-          return inputs
-
-      inputs = conv_layer(inputs, 2, 3, 3, 16, "VALID", 'conv_layer1')
-      inputs = conv_layer(inputs, 2, 5, 5, 32, "VALID", 'conv_layer2')
-      inputs = tf.reshape(inputs, [batch_size, -1])
-      fc_shape2 = int(inputs.get_shape()[1])
-      weights = tf.get_variable("fc_weights",
-                                shape=[fc_shape2, 10],
-                                dtype=tf.float32,
-                                initializer=tf.random_normal_initializer(stddev=0.01))
-      bias = tf.get_variable("fc_bias",
-                             shape=[10, ],
-                             dtype=tf.float32,
-                             initializer=tf.constant_initializer(0.0))
-
-      return tf.nn.relu(tf.nn.bias_add(tf.matmul(inputs, weights), bias))
-
-  
-  def build():
-    image_batch, label_batch = queue.dequeue_many(batch_size)
-    label_batch = tf.reshape(label_batch, [batch_size])
-    output = network(image_batch)
-
-    return _xent_loss(output, label_batch)
-
-  return build
-
-
-def LeNet(path,
-          conv_channels=None,
-          linear_layers=None,
-          batch_norm=True,
-          batch_size=128,
-          num_threads=4,
-          min_queue_examples=1000,
-          mode="train"):
-
-    # Data.
-    _maybe_download_cifar10(path)
-
-    # Read images and labels from disk.
-    if mode == "train":
-        filenames = [os.path.join(path, CIFAR10_FOLDER, "data_batch_{}.bin".format(i)) for i in xrange(1, 6)]
-    elif mode == "test":
-        filenames = [os.path.join(path, CIFAR10_FOLDER, "test_batch.bin")]
-    else:
-        raise ValueError("Mode {} not recognised".format(mode))
-    depth = 3
-    height = 32
-    width = 32
-    label_bytes = 1
-    image_bytes = depth * height * width
-    record_bytes = label_bytes + image_bytes
-    reader = tf.FixedLengthRecordReader(record_bytes=record_bytes)
-    _, record = reader.read(tf.train.string_input_producer(filenames))
-    record_bytes = tf.decode_raw(record, tf.uint8)
-
-    label = tf.cast(tf.slice(record_bytes, [0], [label_bytes]), tf.int32)
-    raw_image = tf.slice(record_bytes, [label_bytes], [image_bytes])
-    image = tf.cast(tf.reshape(raw_image, [depth, height, width]), tf.float32)
-    # height x width x depth.
-    image = tf.transpose(image, [1, 2, 0])
-    image = tf.div(image, 255)
-
-    queue = tf.RandomShuffleQueue(capacity=min_queue_examples + 3 * batch_size,
-                                  min_after_dequeue=min_queue_examples,
-                                  dtypes=[tf.float32, tf.int32],
-                                  shapes=[image.get_shape(), label.get_shape()])
-    enqueue_ops = [queue.enqueue([image, label]) for _ in xrange(num_threads)]
-    tf.train.add_queue_runner(tf.train.QueueRunner(queue, enqueue_ops))
-
-    # Network.
-    def _conv_activation(x):  # pylint: disable=invalid-name
-        return tf.nn.max_pool(tf.sigmoid(x),
-                              ksize=[1, 2, 2, 1],
-                              strides=[1, 2, 2, 1],
-                              padding="VALID")
-
-    conv = snt.nets.ConvNet2D(output_channels=conv_channels,
-                              kernel_shapes=[5],
-                              strides=[1],
-                              paddings=[snt.VALID],
-                              activation=_conv_activation,
-                              activate_final=True,
-                              initializers=_nn_initializers,
-                              use_batch_norm=batch_norm)
-
-    if batch_norm:
-        linear_activation = lambda x: tf.sigmoid(snt.BatchNorm()(x, is_training=True))
-    else:
-        linear_activation = tf.sigmoid
-
-    mlp = snt.nets.MLP(list(linear_layers) + [10],
-                       activation=linear_activation,
-                       initializers=_nn_initializers)
-    network = snt.Sequential([conv, snt.BatchFlatten(), mlp])
+    build_fns = [getattr(sys.modules[__name__], p["name"])(**p["options"])
+                 for p in problems]
 
     def build():
-        image_batch, label_batch = queue.dequeue_many(batch_size)
-        label_batch = tf.reshape(label_batch, [batch_size])
+        all_x, all_c = [], []
+        loss_fns = []
+        offsets = []
+        offset = 0
+        for i, bfn in enumerate(build_fns):
+            x_i, c_i, loss_i = bfn()
+            offsets.append((offset, offset + len(x_i)))
+            offset += len(x_i)
+            all_x.extend(x_i)
+            all_c.extend(c_i)
+            loss_fns.append((loss_i, len(x_i), weights[i] if weights else 1.0))
 
-        output = network(image_batch)
-        return _xent_loss(output, label_batch)
+        def loss_fn(x_tensors):
+            total = 0.0
+            off = 0
+            for loss_i, n_xi, w_i in loss_fns:
+                total = total + w_i * loss_i(x_tensors[off: off + n_xi])
+                off += n_xi
+            return total
 
+        return all_x, all_c, loss_fn
     return build
 
 
-def NAS(path,
-        batch_norm=True,
-        batch_size=128,
-        num_threads=4,
-        min_queue_examples=1000,
-        mode="train"):
-    """Cifar10 classification with a convolutional network."""
+# ---------------------------------------------------------------------------
+# MNIST
+# ---------------------------------------------------------------------------
 
-    # Data.
-    _maybe_download_cifar10(path)
-
-    # Read images and labels from disk.
-    if mode == "train":
-        filenames = [os.path.join(path, CIFAR10_FOLDER, "data_batch_{}.bin".format(i)) for i in xrange(1, 6)]
-    elif mode == "test":
-        filenames = [os.path.join(path, CIFAR10_FOLDER, "test_batch.bin")]
+def mnist(layers, activation="sigmoid", batch_size=128, mode="train"):
+    """MNIST classification with a multi-layer perceptron."""
+    if activation == "sigmoid":
+        act_fn = tf.sigmoid
+    elif activation == "relu":
+        act_fn = tf.nn.relu
     else:
-        raise ValueError("Mode {} not recognised".format(mode))
+        raise ValueError("{} activation not supported".format(activation))
 
-    depth = 3
-    height = 32
-    width = 32
-    label_bytes = 1
-    image_bytes = depth * height * width
-    record_bytes = label_bytes + image_bytes
-    reader = tf.FixedLengthRecordReader(record_bytes=record_bytes)
-    _, record = reader.read(tf.train.string_input_producer(filenames))
-    record_bytes = tf.decode_raw(record, tf.uint8)
+    images_np, labels_np = _load_mnist(mode)
+    num_examples = len(images_np)
+    images_const = tf.constant(images_np)
+    labels_const = tf.constant(labels_np)
 
-    label = tf.cast(tf.slice(record_bytes, [0], [label_bytes]), tf.int32)
-    raw_image = tf.slice(record_bytes, [label_bytes], [image_bytes])
-    image = tf.cast(tf.reshape(raw_image, [depth, height, width]), tf.float32)
-    # height x width x depth.
-    image = tf.transpose(image, [1, 2, 0])
-    image = tf.div(image, 255)
+    def build():
+        layer_sizes = [784] + list(layers) + [10]
+        x_vars = []
+        for i in range(len(layer_sizes) - 1):
+            w = tf.Variable(
+                tf.random.normal([layer_sizes[i], layer_sizes[i + 1]], stddev=0.01),
+                name="w_{}".format(i))
+            b = tf.Variable(
+                tf.random.normal([layer_sizes[i + 1]], stddev=0.01),
+                name="b_{}".format(i))
+            x_vars.extend([w, b])
 
-    queue = tf.RandomShuffleQueue(capacity=min_queue_examples + 3 * batch_size,
-                                  min_after_dequeue=min_queue_examples,
-                                  dtypes=[tf.float32, tf.int32],
-                                  shapes=[image.get_shape(), label.get_shape()])
-    enqueue_ops = [queue.enqueue([image, label]) for _ in xrange(num_threads)]
-    tf.train.add_queue_runner(tf.train.QueueRunner(queue, enqueue_ops))
+        def loss_fn(x_tensors):
+            indices = tf.random.uniform([batch_size], 0, num_examples, tf.int64)
+            batch_images = tf.gather(images_const, indices)
+            batch_labels = tf.gather(labels_const, indices)
 
-    # Network
-    def network(inputs, training=True):
-        def conv_layer(inputs, strides, c_h, c_w, output_channels, padding, name):
-            n_channels = int(inputs.get_shape()[-1])
-            with tf.variable_scope(name) as scope:
-                kernel1 = tf.get_variable('weights1',
-                                          shape=[c_h, c_w, n_channels, output_channels],
-                                          dtype=tf.float32,
-                                          initializer=tf.random_normal_initializer(stddev=0.01)
-                                          )
+            h = batch_images
+            for i in range(0, len(x_tensors) - 2, 2):
+                w_t, b_t = x_tensors[i], x_tensors[i + 1]
+                h = act_fn(tf.matmul(h, w_t) + b_t)
+            w_out, b_out = x_tensors[-2], x_tensors[-1]
+            logits = tf.matmul(h, w_out) + b_out
+            return _xent_loss(logits, batch_labels)
 
-                biases1 = tf.get_variable('biases1', [output_channels], initializer=tf.constant_initializer(0.0))
-            inputs = tf.nn.conv2d(inputs, kernel1, [1, strides, strides, 1], padding)
-            inputs = tf.nn.bias_add(inputs, biases1)
+        return x_vars, [], loss_fn
+    return build
+
+
+def mnist_conv(batch_norm=True, batch_size=128, mode="train"):
+    """MNIST classification with a small convolutional network."""
+    images_np, labels_np = _load_mnist(mode)
+    num_examples = len(images_np)
+    # Reshape to [N, 28, 28, 1]
+    images_np_4d = images_np.reshape(-1, 28, 28, 1)
+    images_const = tf.constant(images_np_4d)
+    labels_const = tf.constant(labels_np)
+
+    def build():
+        # Conv layer 1: 3x3, 1->16
+        k1 = tf.Variable(tf.random.normal([3, 3, 1, 16], stddev=0.01), name="k1")
+        b1 = tf.Variable(tf.zeros([16]), name="b1")
+        # Conv layer 2: 5x5, 16->32
+        k2 = tf.Variable(tf.random.normal([5, 5, 16, 32], stddev=0.01), name="k2")
+        b2 = tf.Variable(tf.zeros([32]), name="b2")
+
+        # We need to figure out the FC input size; build once with dummy input
+        dummy = np.zeros([1, 28, 28, 1], dtype=np.float32)
+        h = tf.nn.conv2d(dummy, k1.numpy(), [1, 1, 1, 1], "VALID")
+        h = tf.nn.bias_add(h, b1)
+        h = tf.nn.max_pool2d(tf.nn.relu(h), ksize=2, strides=2, padding="VALID")
+        h = tf.nn.conv2d(h, k2.numpy(), [1, 1, 1, 1], "VALID")
+        h = tf.nn.bias_add(h, b2)
+        h = tf.nn.max_pool2d(tf.nn.relu(h), ksize=2, strides=2, padding="VALID")
+        fc_in = int(np.prod(h.shape[1:]))
+
+        w_fc = tf.Variable(tf.random.normal([fc_in, 10], stddev=0.01), name="w_fc")
+        b_fc = tf.Variable(tf.zeros([10]), name="b_fc")
+
+        bn1 = tf.keras.layers.BatchNormalization(name="bn1") if batch_norm else None
+        bn2 = tf.keras.layers.BatchNormalization(name="bn2") if batch_norm else None
+        bn_vars = (bn1.trainable_variables + bn2.trainable_variables
+                   if batch_norm else [])
+
+        x_vars = [k1, b1, k2, b2, w_fc, b_fc] + bn_vars
+
+        def loss_fn(x_tensors, training=True):
+            k1_t, b1_t, k2_t, b2_t, w_fc_t, b_fc_t = x_tensors[:6]
+            indices = tf.random.uniform([batch_size], 0, num_examples, tf.int64)
+            batch_imgs = tf.gather(images_const, indices)
+            batch_lbls = tf.gather(labels_const, indices)
+
+            h = tf.nn.conv2d(batch_imgs, k1_t, [1, 1, 1, 1], "VALID")
+            h = tf.nn.bias_add(h, b1_t)
             if batch_norm:
-                inputs = tf.layers.batch_normalization(inputs, training=training)
-            inputs = tf.nn.relu(inputs)
-            return inputs
+                h = bn1(h, training=training)
+            h = tf.nn.max_pool2d(tf.nn.relu(h), ksize=2, strides=2, padding="VALID")
 
-        def _pooling(x):
-            return tf.nn.avg_pool(x,
-                                  ksize=[1, 3, 3, 1],
-                                  strides=[1, 1, 1, 1],
-                                  padding="SAME")
+            h = tf.nn.conv2d(h, k2_t, [1, 1, 1, 1], "VALID")
+            h = tf.nn.bias_add(h, b2_t)
+            if batch_norm:
+                h = bn2(h, training=training)
+            h = tf.nn.max_pool2d(tf.nn.relu(h), ksize=2, strides=2, padding="VALID")
 
-        node0 = conv_layer(inputs, 1, 3, 3, 16, "SAME", 'node0')
-        node0_onto_node2 = conv_layer(node0, 1, 3, 3, 16, "SAME", 'node0_onto_node2')
-        node1 = conv_layer(node0, 1, 3, 3, 16, "SAME", 'node1')
-        node1_onto_node3 = conv_layer(node1, 1, 3, 3, 16, "SAME", 'node1_onto_node3')
-        node2 = _pooling(node1) + node0_onto_node2
-        node3 = node2 + node1_onto_node3 + node0
-        node_final = tf.reduce_mean(tf.reshape(node3, [batch_size, -1, 16]), axis=1)
+            h = tf.reshape(h, [batch_size, -1])
+            logits = tf.nn.relu(tf.matmul(h, w_fc_t) + b_fc_t)
+            return _xent_loss(logits, batch_lbls)
 
-        fc_shape2 = int(node_final.get_shape()[1])
-        weights = tf.get_variable("fc_weights",
-                                  shape=[fc_shape2, 10],
-                                  dtype=tf.float32,
-                                  initializer=tf.random_normal_initializer(stddev=0.01))
-        bias = tf.get_variable("fc_bias",
-                               shape=[10, ],
-                               dtype=tf.float32,
-                               initializer=tf.constant_initializer(0.0))
-        return tf.nn.relu(tf.nn.bias_add(tf.matmul(node_final, weights), bias))
-
-    def build():
-        image_batch, label_batch = queue.dequeue_many(batch_size)
-        label_batch = tf.reshape(label_batch, [batch_size])
-
-        output = network(image_batch)
-        return _xent_loss(output, label_batch)
-
+        return x_vars, [], loss_fn
     return build
 
 
-def vgg16_cifar10(path,  # pylint: disable=invalid-name
-            batch_norm=False,
-            batch_size=128,
-            num_threads=4,
-            min_queue_examples=1000,
-            mode="train"):
-    """Cifar10 classification with a convolutional network."""
-    
-    # Data.
-    _maybe_download_cifar10(path)
-    # pdb.set_trace()
-    # Read images and labels from disk.
-    if mode == "train":
-        filenames = [os.path.join(path,
-                                  CIFAR10_FOLDER,
-                                  "data_batch_{}.bin".format(i))
-                     for i in xrange(1, 6)]
-        is_training = True
-    elif mode == "test":
-        filenames = [os.path.join(path, CIFAR10_FOLDER, "test_batch.bin")]
-        is_training = False
-    else:
-        raise ValueError("Mode {} not recognised".format(mode))
-    
-    depth = 3
-    height = 32
-    width = 32
-    label_bytes = 1
-    image_bytes = depth * height * width
-    record_bytes = label_bytes + image_bytes
-    reader = tf.FixedLengthRecordReader(record_bytes=record_bytes)
-    _, record = reader.read(tf.train.string_input_producer(filenames))
-    record_bytes = tf.decode_raw(record, tf.uint8)
-    
-    label = tf.cast(tf.slice(record_bytes, [0], [label_bytes]), tf.int32)
-    raw_image = tf.slice(record_bytes, [label_bytes], [image_bytes])
-    image = tf.cast(tf.reshape(raw_image, [depth, height, width]), tf.float32)
-    # height x width x depth.
-    image = tf.transpose(image, [1, 2, 0])
-    image = tf.math.divide(image, 255)
+# ---------------------------------------------------------------------------
+# CIFAR-10
+# ---------------------------------------------------------------------------
 
-    queue = tf.RandomShuffleQueue(capacity=min_queue_examples + 3 * batch_size,
-                                  min_after_dequeue=min_queue_examples,
-                                  dtypes=[tf.float32, tf.int32],
-                                  shapes=[image.get_shape(), label.get_shape()])
-    enqueue_ops = [queue.enqueue([image, label]) for _ in xrange(num_threads)]
-    tf.train.add_queue_runner(tf.train.QueueRunner(queue, enqueue_ops))
+def cifar10(path=None, batch_norm=True, batch_size=128, mode="train"):
+    """CIFAR-10 classification with a small convolutional network."""
+    images_np, labels_np = _load_cifar10(mode)
+    num_examples = len(images_np)
+    images_const = tf.constant(images_np)
+    labels_const = tf.constant(labels_np)
 
+    def build():
+        k1 = tf.Variable(tf.random.normal([3, 3, 3, 16], stddev=0.01), name="k1")
+        b1 = tf.Variable(tf.zeros([16]), name="b1")
+        k2 = tf.Variable(tf.random.normal([5, 5, 16, 32], stddev=0.01), name="k2")
+        b2 = tf.Variable(tf.zeros([32]), name="b2")
+
+        dummy = np.zeros([1, 32, 32, 3], dtype=np.float32)
+        h = tf.nn.conv2d(dummy, k1.numpy(), [1, 2, 2, 1], "VALID")
+        h = tf.nn.max_pool2d(tf.nn.relu(h), ksize=2, strides=2, padding="VALID")
+        h = tf.nn.conv2d(h, k2.numpy(), [1, 2, 2, 1], "VALID")
+        h = tf.nn.max_pool2d(tf.nn.relu(h), ksize=2, strides=2, padding="VALID")
+        fc_in = int(np.prod(h.shape[1:]))
+
+        w_fc = tf.Variable(tf.random.normal([fc_in, 10], stddev=0.01), name="w_fc")
+        b_fc = tf.Variable(tf.zeros([10]), name="b_fc")
+
+        bn1 = tf.keras.layers.BatchNormalization(name="bn1") if batch_norm else None
+        bn2 = tf.keras.layers.BatchNormalization(name="bn2") if batch_norm else None
+        bn_vars = (bn1.trainable_variables + bn2.trainable_variables
+                   if batch_norm else [])
+
+        x_vars = [k1, b1, k2, b2, w_fc, b_fc] + bn_vars
+
+        def loss_fn(x_tensors, training=True):
+            k1_t, b1_t, k2_t, b2_t, w_fc_t, b_fc_t = x_tensors[:6]
+            indices = tf.random.uniform([batch_size], 0, num_examples, tf.int64)
+            batch_imgs = tf.gather(images_const, indices)
+            batch_lbls = tf.gather(labels_const, indices)
+
+            h = tf.nn.conv2d(batch_imgs, k1_t, [1, 2, 2, 1], "VALID")
+            h = tf.nn.bias_add(h, b1_t)
+            if batch_norm:
+                h = bn1(h, training=training)
+            h = tf.nn.max_pool2d(tf.nn.relu(h), ksize=2, strides=2, padding="VALID")
+
+            h = tf.nn.conv2d(h, k2_t, [1, 2, 2, 1], "VALID")
+            h = tf.nn.bias_add(h, b2_t)
+            if batch_norm:
+                h = bn2(h, training=training)
+            h = tf.nn.max_pool2d(tf.nn.relu(h), ksize=2, strides=2, padding="VALID")
+
+            h = tf.reshape(h, [batch_size, -1])
+            logits = tf.nn.relu(tf.matmul(h, w_fc_t) + b_fc_t)
+            return _xent_loss(logits, batch_lbls)
+
+        return x_vars, [], loss_fn
+    return build
+
+
+def LeNet(path=None, conv_channels=None, linear_layers=None,
+          batch_norm=True, batch_size=128, mode="train"):
+    """LeNet-style network on CIFAR-10."""
+    images_np, labels_np = _load_cifar10(mode)
+    num_examples = len(images_np)
+    images_const = tf.constant(images_np)
+    labels_const = tf.constant(labels_np)
+
+    if conv_channels is None:
+        conv_channels = (6, 16)
+    if linear_layers is None:
+        linear_layers = (120, 84)
+
+    def build():
+        # Build conv layers
+        conv_kernels = []
+        conv_biases = []
+        in_ch = 3
+        for i, out_ch in enumerate(conv_channels):
+            k = tf.Variable(tf.random.normal([5, 5, in_ch, out_ch], stddev=0.01), name="ck_{}".format(i))
+            b = tf.Variable(tf.zeros([out_ch]), name="cb_{}".format(i))
+            conv_kernels.append(k)
+            conv_biases.append(b)
+            in_ch = out_ch
+
+        # Determine FC input size with dummy forward
+        dummy = np.zeros([1, 32, 32, 3], dtype=np.float32)
+        h = dummy
+        for k, b in zip(conv_kernels, conv_biases):
+            h = tf.sigmoid(tf.nn.bias_add(
+                tf.nn.conv2d(h, k.numpy(), [1, 1, 1, 1], "VALID"), b))
+            h = tf.nn.max_pool2d(h, ksize=2, strides=2, padding="VALID")
+        fc_in = int(np.prod(h.shape[1:]))
+
+        # Build FC layers
+        fc_weights = []
+        fc_biases = []
+        prev_size = fc_in
+        for i, size in enumerate(list(linear_layers) + [10]):
+            w = tf.Variable(tf.random.normal([prev_size, size], stddev=0.01), name="fw_{}".format(i))
+            b = tf.Variable(tf.zeros([size]), name="fb_{}".format(i))
+            fc_weights.append(w)
+            fc_biases.append(b)
+            prev_size = size
+
+        x_vars = conv_kernels + conv_biases + fc_weights + fc_biases
+        n_conv = len(conv_channels)
+
+        def loss_fn(x_tensors):
+            ks = x_tensors[:n_conv]
+            bs_c = x_tensors[n_conv:2 * n_conv]
+            ws = x_tensors[2 * n_conv:2 * n_conv + len(fc_weights)]
+            bs_f = x_tensors[2 * n_conv + len(fc_weights):]
+
+            indices = tf.random.uniform([batch_size], 0, num_examples, tf.int64)
+            batch_imgs = tf.gather(images_const, indices)
+            batch_lbls = tf.gather(labels_const, indices)
+
+            h = batch_imgs
+            for k, b in zip(ks, bs_c):
+                h = tf.sigmoid(tf.nn.bias_add(
+                    tf.nn.conv2d(h, k, [1, 1, 1, 1], "VALID"), b))
+                h = tf.nn.max_pool2d(h, ksize=2, strides=2, padding="VALID")
+            h = tf.reshape(h, [batch_size, -1])
+            for i, (w, b) in enumerate(zip(ws, bs_f)):
+                h = tf.sigmoid(tf.matmul(h, w) + b) if i < len(ws) - 1 else tf.matmul(h, w) + b
+            return _xent_loss(h, batch_lbls)
+
+        return x_vars, [], loss_fn
+    return build
+
+
+def NAS(path=None, batch_norm=True, batch_size=128, mode="train"):
+    """NAS-like cell network on CIFAR-10."""
+    images_np, labels_np = _load_cifar10(mode)
+    num_examples = len(images_np)
+    images_const = tf.constant(images_np)
+    labels_const = tf.constant(labels_np)
+
+    def build():
+        def _make_conv(in_ch, out_ch, name):
+            k = tf.Variable(tf.random.normal([3, 3, in_ch, out_ch], stddev=0.01), name=name + "_k")
+            b = tf.Variable(tf.zeros([out_ch]), name=name + "_b")
+            return k, b
+
+        n0k, n0b = _make_conv(3, 16, "node0")
+        n0_2k, n0_2b = _make_conv(16, 16, "node0_2")
+        n1k, n1b = _make_conv(16, 16, "node1")
+        n1_3k, n1_3b = _make_conv(16, 16, "node1_3")
+        w_fc = tf.Variable(tf.random.normal([16, 10], stddev=0.01), name="fc_w")
+        b_fc = tf.Variable(tf.zeros([10]), name="fc_b")
+
+        x_vars = [n0k, n0b, n0_2k, n0_2b, n1k, n1b, n1_3k, n1_3b, w_fc, b_fc]
+
+        def conv(x, k, b):
+            return tf.nn.relu(tf.nn.bias_add(tf.nn.conv2d(x, k, [1, 1, 1, 1], "SAME"), b))
+
+        def loss_fn(x_tensors):
+            n0k_t, n0b_t, n0_2k_t, n0_2b_t = x_tensors[0], x_tensors[1], x_tensors[2], x_tensors[3]
+            n1k_t, n1b_t, n1_3k_t, n1_3b_t = x_tensors[4], x_tensors[5], x_tensors[6], x_tensors[7]
+            w_fc_t, b_fc_t = x_tensors[8], x_tensors[9]
+
+            indices = tf.random.uniform([batch_size], 0, num_examples, tf.int64)
+            batch_imgs = tf.gather(images_const, indices)
+            batch_lbls = tf.gather(labels_const, indices)
+
+            node0 = conv(batch_imgs, n0k_t, n0b_t)
+            node0_onto_node2 = conv(node0, n0_2k_t, n0_2b_t)
+            node1 = conv(node0, n1k_t, n1b_t)
+            node1_onto_node3 = conv(node1, n1_3k_t, n1_3b_t)
+            node2 = tf.nn.avg_pool2d(node1, ksize=3, strides=1, padding="SAME") + node0_onto_node2
+            node3 = node2 + node1_onto_node3 + node0
+            node_final = tf.reduce_mean(tf.reshape(node3, [batch_size, -1, 16]), axis=1)
+            logits = tf.nn.relu(tf.matmul(node_final, w_fc_t) + b_fc_t)
+            return _xent_loss(logits, batch_lbls)
+
+        return x_vars, [], loss_fn
+    return build
+
+
+def vgg16_cifar10(path=None, batch_norm=False, batch_size=128, mode="train"):
+    """CIFAR-10 with VGG16."""
+    from vgg16 import VGG16
+    images_np, labels_np = _load_cifar10(mode)
+    num_examples = len(images_np)
+    images_const = tf.constant(images_np)
+    labels_const = tf.constant(labels_np)
     vgg = VGG16(0.5, 10)
+
     def build():
-        image_batch, label_batch = queue.dequeue_many(batch_size)
-        label_batch = tf.reshape(label_batch, [batch_size])
-        # pdb.set_trace()
-        output = vgg._build_model(image_batch)
-        # print(output.shape)
-        return _xent_loss(output, label_batch)
-    
+        # Build VGG by doing a dummy forward pass to create variables
+        dummy = np.zeros([1, 32, 32, 3], dtype=np.float32)
+        vgg._build_model(tf.constant(dummy))
+        x_vars = vgg.trainable_variables
+
+        def loss_fn(x_tensors):
+            # VGG16 is now a Keras model; x_tensors are its weights
+            # Apply weights temporarily
+            indices = tf.random.uniform([batch_size], 0, num_examples, tf.int64)
+            batch_imgs = tf.gather(images_const, indices)
+            batch_lbls = tf.gather(labels_const, indices)
+            output = vgg._build_model(batch_imgs)
+            return _xent_loss(output, batch_lbls)
+
+        return list(x_vars), [], loss_fn
     return build
 
 
+# ---------------------------------------------------------------------------
+# Confocal microscopy (training / simulation mode only)
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------
-# Custom Confocal Microscopy Problems
-# ---------------------------------------
-def confocal_microscopy_3d(batch_size=128, num_points=5, ROI=[28, 28, 28], stddev=0.01, dtype=tf.float32, inference=False):
-  if inference:
-    def build():
-      """Builds loss graph."""
-      # Trainable variable.
-      I_var = []
-      x_var = []
-      y_var = []
-      z_var = []
-      sigmaxy_var = []
-      sigmaz_var = []
-      
-      for i in range(num_points):
-        I_var.append(tf.get_variable(
-          "I_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
-        
-        x_var.append(tf.get_variable(
-          "x_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
+def confocal_microscopy_3d(batch_size=128, num_points=5, ROI=None,
+                           stddev=0.01, dtype=tf.float32, inference=False):
+    if ROI is None:
+        ROI = [28, 28, 28]
 
-        y_var.append(tf.get_variable(
-          "y_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
+    if inference:
+        raise NotImplementedError(
+            "inference=True requires an external image array; "
+            "pass it via loss_fn(x_tensors, img) after migration.")
 
-        z_var.append(tf.get_variable(
-          "z_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
-
-        sigmaxy_var.append(tf.get_variable(
-          "sigmaxy_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
-
-        sigmaz_var.append(tf.get_variable(
-          "sigmaz_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
-      
-      # predict
-      def point_spread_function_3d(theta):
-        '''
-        Microscopic fluorescence point spread function
-        Args:
-          theta : Variables in the point spread function, [I0, x0, y0, z0, sigmaxy, sigmaz]
-        Returns:
-          I : fluorescence image, the size is [batch_size, size_x * size_y * sizez]
-        '''
-        priors_list = [tfd.Uniform(low=0.5, high=2.0), 
-                  tfd.Uniform(low=0.5, high=ROI[0]-1), 
-                  tfd.Uniform(low=0.5, high=ROI[1]-1), 
-                  tfd.Uniform(low=0.5, high=ROI[2]-1), 
-                  tfd.Uniform(low=2, high=4), 
-                  tfd.Uniform(low=2, high=4)]
-        xs = tf.linspace(0.0, float(ROI[0]-1), ROI[0])
-        ys = tf.linspace(0.0, float(ROI[1]-1), ROI[1])
-        zs = tf.linspace(0.0, float(ROI[2]-1), ROI[2])
+    def _psf(theta, roi):
+        priors = [
+            tfd.Uniform(low=0.5, high=2.0),
+            tfd.Uniform(low=0.5, high=float(roi[0] - 1)),
+            tfd.Uniform(low=0.5, high=float(roi[1] - 1)),
+            tfd.Uniform(low=0.5, high=float(roi[2] - 1)),
+            tfd.Uniform(low=2.0, high=4.0),
+            tfd.Uniform(low=2.0, high=4.0),
+        ]
+        xs = tf.linspace(0.0, float(roi[0] - 1), roi[0])
+        ys = tf.linspace(0.0, float(roi[1] - 1), roi[1])
+        zs = tf.linspace(0.0, float(roi[2] - 1), roi[2])
         X, Y, Z = tf.meshgrid(xs, ys, zs)
-        
-        I0 = priors_list[0].quantile(tf.reshape(theta[0], [theta[0].shape[0], 1]))
-        x0 = priors_list[1].quantile(tf.reshape(theta[1], [theta[1].shape[0], 1]))
-        y0 = priors_list[2].quantile(tf.reshape(theta[2], [theta[2].shape[0], 1]))
-        z0 = priors_list[3].quantile(tf.reshape(theta[3], [theta[3].shape[0], 1]))
-        sigmaxy = priors_list[4].quantile(tf.reshape(theta[4], [theta[4].shape[0], 1]))
-        sigmaz = priors_list[5].quantile(tf.reshape(theta[5], [theta[5].shape[0], 1]))
+
+        I0 = priors[0].quantile(tf.reshape(theta[0], [theta[0].shape[0], 1]))
+        x0 = priors[1].quantile(tf.reshape(theta[1], [theta[1].shape[0], 1]))
+        y0 = priors[2].quantile(tf.reshape(theta[2], [theta[2].shape[0], 1]))
+        z0 = priors[3].quantile(tf.reshape(theta[3], [theta[3].shape[0], 1]))
+        sxy = priors[4].quantile(tf.reshape(theta[4], [theta[4].shape[0], 1]))
+        sz = priors[5].quantile(tf.reshape(theta[5], [theta[5].shape[0], 1]))
 
         xk = tf.reshape(X, [1, -1])
         yk = tf.reshape(Y, [1, -1])
         zk = tf.reshape(Z, [1, -1])
+        sq2 = tf.math.sqrt(2.0)
 
-        I = I0 * ((-tf.math.erf((-0.5 - x0 + xk)/(tf.math.sqrt(2.0)*sigmaxy)) + tf.math.erf((0.5 - x0 + xk)/(tf.math.sqrt(2.0)*sigmaxy))) \
-              * (-tf.math.erf((-0.5 - y0 + yk)/(tf.math.sqrt(2.0)*sigmaxy)) + tf.math.erf((0.5 - y0 + yk)/(tf.math.sqrt(2.0)*sigmaxy))) \
-              * (-tf.math.erf((-0.5 - z0 + zk)/(tf.math.sqrt(2.0)*sigmaz)) + tf.math.erf((0.5 - z0 + zk)/(tf.math.sqrt(2.0)*sigmaz))))/8.0
+        I = I0 * (
+            (-tf.math.erf((-0.5 - x0 + xk) / (sq2 * sxy))
+             + tf.math.erf((0.5 - x0 + xk) / (sq2 * sxy)))
+            * (-tf.math.erf((-0.5 - y0 + yk) / (sq2 * sxy))
+               + tf.math.erf((0.5 - y0 + yk) / (sq2 * sxy)))
+            * (-tf.math.erf((-0.5 - z0 + zk) / (sq2 * sz))
+               + tf.math.erf((0.5 - z0 + zk) / (sq2 * sz)))
+        ) / 8.0
         return I
-    
-      y_pred = tf.add_n([
-        point_spread_function_3d([I_var[i], x_var[i], y_var[i], z_var[i], sigmaxy_var[i], sigmaz_var[i]])
-        for i in range(num_points)])
-      
-      bg_var = tf.get_variable(
-          "bg_var",
-          shape=[batch_size, 1],
-          dtype=dtype,  
-          initializer=tf.random_normal_initializer(stddev=stddev))
-      
-      img_placeholder = tf.placeholder(dtype, shape=(batch_size, ROI[0]*ROI[1]*ROI[2]))
-      obj = tf.reduce_mean(tf.math.reduce_sum((y_pred + bg_var - tf.math.l2_normalize(img_placeholder, axis=1)) ** 2, axis=1))
-      return obj
-  else:
+
     def build():
-      """Builds loss graph."""
-      # Trainable variable.
-      I_var = []
-      x_var = []
-      y_var = []
-      z_var = []
-      sigmaxy_var = []
-      sigmaz_var = []
-      
-      for i in range(num_points):
-        I_var.append(tf.get_variable(
-          "I_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
-        
-        x_var.append(tf.get_variable(
-          "x_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
+        def _make_vars(suffix, trainable):
+            init = tf.random.uniform if trainable else tf.random.uniform
+            return [
+                tf.Variable(init([batch_size, 1], dtype=dtype),
+                            trainable=trainable, name="{}_{}".format(n, suffix))
+                for n in ["I", "x", "y", "z", "sxy", "sz"]
+            ]
 
-        y_var.append(tf.get_variable(
-          "y_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
+        opt_vars_list = [_make_vars(str(i), True) for i in range(num_points)]
+        sim_vars_list = [_make_vars("sim_{}".format(i), False) for i in range(num_points)]
 
-        z_var.append(tf.get_variable(
-          "z_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
+        bg_var = tf.Variable(tf.random.normal([batch_size, 1], stddev=stddev, dtype=dtype),
+                             name="bg_var")
+        bg_sim = tf.Variable(tf.random.uniform([batch_size, 1], dtype=dtype),
+                             trainable=False, name="bg_sim")
 
-        sigmaxy_var.append(tf.get_variable(
-          "sigmaxy_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
+        x_vars = [v for group in opt_vars_list for v in group] + [bg_var]
+        const_vars = [v for group in sim_vars_list for v in group] + [bg_sim]
 
-        sigmaz_var.append(tf.get_variable(
-          "sigmaz_var_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer()))
+        def loss_fn(x_tensors):
+            n_opt = len(x_tensors) - 1
+            vpt = 6
+            n_pts = n_opt // vpt
+            bg_v = x_tensors[-1]
 
-      # Non-trainable variables.
-      I_sim = []
-      x_sim  = []
-      y_sim  = []
-      z_sim  = []
-      sigmaxy_sim = []
-      sigmaz_sim = []
+            y_pred = tf.add_n([
+                _psf([x_tensors[i * vpt + j] for j in range(vpt)], ROI)
+                for i in range(n_pts)
+            ])
+            y_sim = tf.add_n([
+                _psf([sim_vars_list[i][j] for j in range(vpt)], ROI)
+                for i in range(num_points)
+            ])
+            target = tf.math.l2_normalize(y_sim + bg_sim, axis=1)
+            return tf.reduce_mean(
+                tf.math.reduce_sum((y_pred + bg_v - target) ** 2, axis=1))
 
-      for i in range(num_points):
-        I_sim.append(tf.get_variable(
-          "I_sim_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer(),
-          trainable=False))
-        
-        x_sim.append(tf.get_variable(
-          "x_sim_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer(),
-          trainable=False))
-
-        y_sim.append(tf.get_variable(
-          "y_sim%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer(),
-          trainable=False))
-
-        z_sim.append(tf.get_variable(
-          "z_sim_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer(),
-          trainable=False))
-
-        sigmaxy_sim.append(tf.get_variable(
-          "sigmaxy_sim_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer(),
-          trainable=False))
-
-        sigmaz_sim.append(tf.get_variable(
-          "sigmaz_sim_%d"%i,
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer(),
-          trainable=False))
-        
-      # predict
-      def point_spread_function_3d(theta):
-        '''
-        Microscopic fluorescence point spread function
-        Args:
-          theta : Variables in the point spread function, [I0, x0, y0, z0, sigmaxy, sigmaz]
-        Returns:
-          I : fluorescence image, the size is [batch_size, size_x * size_y * sizez]
-        '''
-        priors_list = [tfd.Uniform(low=0.5, high=2.0), 
-                  tfd.Uniform(low=0.5, high=ROI[0]-1), 
-                  tfd.Uniform(low=0.5, high=ROI[1]-1), 
-                  tfd.Uniform(low=0.5, high=ROI[2]-1), 
-                  tfd.Uniform(low=2, high=4), 
-                  tfd.Uniform(low=2, high=4)]
-        xs = tf.linspace(0.0, float(ROI[0]-1), ROI[0])
-        ys = tf.linspace(0.0, float(ROI[1]-1), ROI[1])
-        zs = tf.linspace(0.0, float(ROI[2]-1), ROI[2])
-        X, Y, Z = tf.meshgrid(xs, ys, zs)
-        
-        I0 = priors_list[0].quantile(tf.reshape(theta[0], [theta[0].shape[0], 1]))
-        x0 = priors_list[1].quantile(tf.reshape(theta[1], [theta[1].shape[0], 1]))
-        y0 = priors_list[2].quantile(tf.reshape(theta[2], [theta[2].shape[0], 1]))
-        z0 = priors_list[3].quantile(tf.reshape(theta[3], [theta[3].shape[0], 1]))
-        sigmaxy = priors_list[4].quantile(tf.reshape(theta[4], [theta[4].shape[0], 1]))
-        sigmaz = priors_list[5].quantile(tf.reshape(theta[5], [theta[5].shape[0], 1]))
-
-        xk = tf.reshape(X, [1, -1])
-        yk = tf.reshape(Y, [1, -1])
-        zk = tf.reshape(Z, [1, -1])
-
-        I = I0 * ((-tf.math.erf((-0.5 - x0 + xk)/(tf.math.sqrt(2.0)*sigmaxy)) + tf.math.erf((0.5 - x0 + xk)/(tf.math.sqrt(2.0)*sigmaxy))) \
-              * (-tf.math.erf((-0.5 - y0 + yk)/(tf.math.sqrt(2.0)*sigmaxy)) + tf.math.erf((0.5 - y0 + yk)/(tf.math.sqrt(2.0)*sigmaxy))) \
-              * (-tf.math.erf((-0.5 - z0 + zk)/(tf.math.sqrt(2.0)*sigmaz)) + tf.math.erf((0.5 - z0 + zk)/(tf.math.sqrt(2.0)*sigmaz))))/8.0
-        return I
-      
-      y_pred = tf.add_n([
-        point_spread_function_3d([I_var[i], x_var[i], y_var[i], z_var[i], sigmaxy_var[i], sigmaz_var[i]])
-        for i in range(num_points)])
-      
-      y_sim = tf.add_n([
-        point_spread_function_3d([I_sim[i], x_sim[i], y_sim[i], z_sim[i], sigmaxy_sim[i], sigmaz_sim[i]])
-        for i in range(num_points)])
-      
-      bg_var = tf.get_variable(
-          "bg_var",
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_normal_initializer(stddev=stddev))
-
-      bg_sim = tf.get_variable(
-          "bg_sim",
-          shape=[batch_size, 1],
-          dtype=dtype,
-          initializer=tf.random_uniform_initializer(),
-          trainable=False)
-      obj = tf.reduce_mean(tf.math.reduce_sum((y_pred + bg_var - tf.math.l2_normalize(y_sim + bg_sim, axis=1)) ** 2, axis=1))
-      return obj
-  return build
-
-
-def square_cos(batch_size=128, num_dims=10,  stddev=0.01, dtype=tf.float32):
-  def build():
-    """Builds loss graph."""
-
-    # Trainable variable.
-    x = tf.get_variable(
-        "x",
-        shape=[batch_size, num_dims],
-        dtype=dtype,
-        initializer=tf.random_normal_initializer(stddev=stddev))
-
-    # Non-trainable variables.
-    w = tf.get_variable("w",
-                        shape=[batch_size, num_dims, num_dims],
-                        dtype=dtype,
-                        initializer=tf.random_uniform_initializer(),
-                        trainable=False)
-    y = tf.get_variable("y",
-                        shape=[batch_size, num_dims],
-                        dtype=dtype,
-                        initializer=tf.random_uniform_initializer(),
-                        trainable=False)
-
-    wcos = tf.get_variable("wcos",
-                        shape=[batch_size, num_dims, num_dims],
-                        dtype=dtype,
-                        initializer=tf.random_uniform_initializer(),
-                        trainable=False)
-
-    product = tf.squeeze(tf.matmul(w, tf.expand_dims(x, -1)))
-    product2 = tf.squeeze(tf.matmul(wcos, tf.expand_dims(10*tf.math.cos(2*3.1415926*x), -1)))
-    product3 = tf.reduce_sum((product - y) ** 2, 1) - tf.reduce_sum(product2, 1) + 10*num_dims
-   
-    return tf.reduce_mean(product3)
-    # return tf.reduce_mean(tf.reduce_mean(tf.reduce_sum((product - y) ** 2, 1)) - tf.reduce_mean(tf.reduce_sum(product2, 1)) + 10*num_dims)
-
-  return build
+        return x_vars, const_vars, loss_fn
+    return build

@@ -1,5 +1,4 @@
-tensorflow-gpu==1.14
-tensorflow_probability==0.7.0
-dm-sonnet==1.11
+tensorflow>=2.10
+tensorflow_probability>=0.18
 dill
-mock
+numpy

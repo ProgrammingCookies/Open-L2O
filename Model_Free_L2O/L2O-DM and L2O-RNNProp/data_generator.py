@@ -12,113 +12,114 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Learning 2 Learn preprocessing modules."""
+"""Data generator for multi-task learning (imitation of reference optimizers)."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import tensorflow as tf
 import numpy as np
-from meta_rnnprop_train import _make_with_custom_variables
-import random
-
-def opt_variables_initializer(opt, var_list, if_adam=False):
-  vars = [opt.get_slot(var, name)
-               for name in opt.get_slot_names()
-               for var in var_list if var is not None]
-  if if_adam:
-    vars.extend(list(opt._get_beta_accumulators()))
-  return tf.variables_initializer(vars)
+import tensorflow as tf
 
 
-class data_loader():
-    def __init__(self, make_loss, x, constants, subsets, scale, optimizers, unroll_len):
+def _flatten_and_concat(tensors):
+    """Flatten each tensor and concatenate into a single 1-D array."""
+    parts = [t.numpy().reshape(-1) for t in tensors]
+    return np.concatenate(parts, axis=0)
+
+
+class data_loader:
+    """Generates (gradient, parameter-update) pairs by running a reference optimizer."""
+
+    def __init__(self, make_loss, subsets, optimizers, unroll_len):
         self.unroll_len = unroll_len
         self.optimizers = optimizers.split(",")
         self.num_subsets = len(subsets)
+        self.subsets = subsets
+        self.make_loss = make_loss
 
-        self.x = x
-        self.x_flat = [self.flatten_and_concat([x[i] for i in subset]) for subset in subsets]
-        self.scale = scale
-        scaled_x = [x[k] * scale[k] for k in range(len(scale))]
-        self.loss = _make_with_custom_variables(make_loss, scaled_x)
-        self.gradients = tf.gradients(self.loss, x)
-        self.gradients_flat = [self.flatten_and_concat([self.gradients[i] for i in subset])
-                               for subset in subsets]
-        self.reset_x = tf.variables_initializer(x+constants)
-        if "adam" in self.optimizers:
-            self.adam = tf.train.AdamOptimizer(0.01)
-            self.update_adam = self.adam.apply_gradients(zip(self.gradients, x))
-            self.reset_adam = opt_variables_initializer(self.adam, x, True)
-        if "rmsprop" in self.optimizers:
-            self.rmsprop = tf.train.RMSPropOptimizer(0.01)
-            self.update_rmsprop = self.rmsprop.apply_gradients(zip(self.gradients, x))
-            self.reset_rmsprop = opt_variables_initializer(self.rmsprop, x)
-        if "nag" in self.optimizers:
-            self.nag = tf.train.MomentumOptimizer(0.01, 0.9, use_nesterov=True)
-            self.update_nag = self.nag.apply_gradients(zip(self.gradients, x))
-            self.reset_nag = opt_variables_initializer(self.nag, x)
-
-    def flatten_and_concat(self, var_list):
-        var_flat = []
-        for var in var_list:
-            var = tf.squeeze(tf.reshape(var, shape=(-1, 1)))
-            var_flat.append(var)
-        var_cat = tf.concat(var_flat, axis=0)
-        return var_cat
-
-    def get_data(self, task_i, sess, num_unrolls, assign_func, rd_scale_bound, if_scale=True, mt_k=1):
-        opt_name = self.optimizers[task_i]
-        update = getattr(self, "update_"+opt_name)
-
-        # init
-        sess.run(self.reset_x)
-
-        # reset
-        opt_reset = getattr(self, "reset_{}".format(opt_name))
-        sess.run(opt_reset)
-
-        # scale
-        if if_scale:
-            r_scale = []
-            for k in self.scale:
-                r_scale.append(np.exp(np.random.uniform(-rd_scale_bound, rd_scale_bound,
-                                                        size=k.shape)))
-            feed_rs = {p: v for p, v in zip(self.scale, r_scale)}
-            k_value_list = []
-            for k_id in range(len(self.scale)):
-                k_value = sess.run(self.x[k_id])
-                k_value = k_value / r_scale[k_id]
-                k_value_list.append(k_value)
-            assert assign_func is not None
-            assign_func(k_value_list)
+    def _make_optimizer(self, name):
+        if name == "adam":
+            return tf.keras.optimizers.Adam(0.01)
+        elif name == "rmsprop":
+            return tf.keras.optimizers.RMSprop(0.01)
+        elif name == "nag":
+            return tf.keras.optimizers.SGD(0.01, momentum=0.9, nesterov=True)
         else:
-            feed_rs = {}
+            raise ValueError("Unknown optimizer: {}".format(name))
 
-        # get updates
+    def get_data(self, task_i, num_unrolls, assign_func=None,
+                 rd_scale_bound=3.0, if_scale=False, mt_k=1):
+        """Run reference optimizer and collect (grad, update) pairs.
+
+        Returns:
+            dict with keys "inputs" and "labels", each a list over num_unrolls
+            of lists over num_subsets of numpy arrays [unroll_len, num_params].
+        """
+        opt_name = self.optimizers[task_i]
+        opt = self._make_optimizer(opt_name)
+
+        # Fresh problem instance
+        x_vars, const_vars, loss_fn = self.make_loss()
+
+        # Optionally apply random scale
+        if if_scale:
+            r_scale = [np.exp(np.random.uniform(-rd_scale_bound, rd_scale_bound,
+                                                size=v.shape))
+                       for v in x_vars]
+            for v, rs in zip(x_vars, r_scale):
+                v.assign(v.numpy() / rs)
+            scale = r_scale
+        else:
+            scale = None
+
         data = {"inputs": [], "labels": []}
-        x_prev = sess.run(self.x_flat)
 
-        for ri in range(num_unrolls):
-            inputs = []  # (unroll_length, num_subsets, num_params)
-            labels = []
-            for stepi in range(self.unroll_len):
-                *gs, _ = sess.run(self.gradients_flat + [update], feed_dict=feed_rs)
-                inputs.append(gs)
-                for ki in range(mt_k-1):
-                    sess.run(update, feed_dict=feed_rs)
-                x_cur = sess.run(self.x_flat)
-                x_diff = [cur-prev for cur, prev in zip(x_cur, x_prev)]
-                x_prev = x_cur
-                labels.append(x_diff)
-            input_subsets = []  # (num_subsets, unroll_length, num_params)
-            label_subsets = []
-            for i in range(self.num_subsets):
-                ipt = np.concatenate([ipt[i][None, :] for ipt in inputs], axis=0)
-                input_subsets.append(ipt)
-                lb = np.concatenate([lb[i][None, :] for lb in labels], axis=0)
-                label_subsets.append(lb)
+        for _ in range(num_unrolls):
+            inputs_window = []   # [unroll_len][num_subsets][num_params]
+            labels_window = []
+
+            x_prev_flat = [_flatten_and_concat([x_vars[j] for j in subset])
+                           for subset in self.subsets]
+
+            for _ in range(self.unroll_len):
+                with tf.GradientTape() as tape:
+                    x_tensors = [tf.identity(v) for v in x_vars]
+                    if scale is not None:
+                        x_tensors = [xi * tf.constant(rs, dtype=tf.float32)
+                                     for xi, rs in zip(x_tensors, scale)]
+                    loss = loss_fn(x_tensors)
+
+                grads = tape.gradient(loss, x_vars)
+
+                # Collect gradients per subset (flattened)
+                step_inputs = [
+                    _flatten_and_concat([grads[j] for j in subset])
+                    for subset in self.subsets
+                ]
+                inputs_window.append(step_inputs)
+
+                # Apply reference optimizer
+                opt.apply_gradients(zip(grads, x_vars))
+                for _ in range(mt_k - 1):
+                    with tf.GradientTape() as tape2:
+                        loss2 = loss_fn([tf.identity(v) for v in x_vars])
+                    grads2 = tape2.gradient(loss2, x_vars)
+                    opt.apply_gradients(zip(grads2, x_vars))
+
+                x_cur_flat = [_flatten_and_concat([x_vars[j] for j in subset])
+                              for subset in self.subsets]
+                step_labels = [cur - prev for cur, prev in
+                               zip(x_cur_flat, x_prev_flat)]
+                labels_window.append(step_labels)
+                x_prev_flat = x_cur_flat
+
+            # Transpose from [time][subset] to [subset][time]
+            input_subsets = [
+                np.stack([inputs_window[t][si] for t in range(self.unroll_len)], axis=0)
+                for si in range(self.num_subsets)
+            ]
+            label_subsets = [
+                np.stack([labels_window[t][si] for t in range(self.unroll_len)], axis=0)
+                for si in range(self.num_subsets)
+            ]
             data["inputs"].append(input_subsets)
             data["labels"].append(label_subsets)
+
         return data
