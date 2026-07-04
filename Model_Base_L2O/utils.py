@@ -115,9 +115,9 @@ class EvalNMSE(tf.keras.metrics.Mean):
 class Adam(tf.keras.optimizers.Adam):
 
   def __init__(self, var_list, freeze_layer=False, **kwargs):
+    super(Adam, self).__init__(**kwargs)
     self.var_list = var_list
     self.freeze_layer = freeze_layer
-    super(Adam, self).__init__(**kwargs)
 
   def apply_gradients(self, grads_and_vars, name=None,
                       all_reduce_sum_gradients=True):
