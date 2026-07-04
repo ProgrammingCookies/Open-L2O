@@ -1,4 +1,5 @@
-__pycache__/ 
+__pycache__/
+migration_changes.txt
 Model_Free_L2O/L2O-DM and L2O-RNNProp/MNIST-data/
 Model_Free_L2O/L2O-Scale/L2O-Scale-Training/__pycache__/
 Model_Free_L2O/L2O-Scale/L2O-Scale-Training/hess_cl_mt/*
