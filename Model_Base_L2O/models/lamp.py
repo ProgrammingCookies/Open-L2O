@@ -1,7 +1,7 @@
 import numpy as np
 from numpy import linalg as LA
-import tensorflow.compat.v2 as tf
-from tensorflow.compat.v2 import keras
+import tensorflow as tf
+import keras
 from .utils import shrink_lamp
 
 

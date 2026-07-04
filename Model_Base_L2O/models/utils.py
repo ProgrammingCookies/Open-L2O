@@ -1,5 +1,5 @@
-import tensorflow.compat.v2 as tf
-from tensorflow.compat.v2 import keras
+import tensorflow as tf
+import keras
 import tensorflow_probability as tfp
 
 
