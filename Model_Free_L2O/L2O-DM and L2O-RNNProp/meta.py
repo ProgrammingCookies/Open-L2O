@@ -123,10 +123,10 @@ class MetaOptimizer:
 
     def meta_loss(self, make_loss, len_unroll, net_assignments=None,
                   second_derivatives=False):
-        """Set up networks and run one unroll, returning loss and state.
+        """Set up networks and run one unroll, returning loss, grads and state.
 
         Returns:
-            (total_loss, x_final, state_final, fx_final, x_vars)
+            (total_loss, meta_grads, x_final, state_final, fx_final, x_vars)
         """
         x_vars, const_vars, loss_fn = make_loss()
         self._setup(x_vars, net_assignments)
@@ -149,15 +149,16 @@ class MetaOptimizer:
             fx_list.append(fx_final)
             total_loss = tf.add_n(fx_list)
 
-        return total_loss, x, state, fx_final, x_vars
+        net_vars = self.trainable_variables
+        meta_grads = meta_tape.gradient(total_loss, net_vars)
+        return total_loss, meta_grads, x, state, fx_final, x_vars
 
     def meta_minimize(self, make_loss, len_unroll, learning_rate=0.01, **kwargs):
         """One-shot: run meta_loss and minimise it, returning the loss."""
-        total_loss, x, state, fx_final, x_vars = self.meta_loss(
+        total_loss, meta_grads, x, state, fx_final, x_vars = self.meta_loss(
             make_loss, len_unroll, **kwargs)
         optimizer = tf.keras.optimizers.Adam(learning_rate)
-        grads = tf.gradients(total_loss, self.trainable_variables)
-        optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        optimizer.apply_gradients(zip(meta_grads, self.trainable_variables))
         return total_loss, x, state, fx_final, x_vars
 
     # ------------------------------------------------------------------
