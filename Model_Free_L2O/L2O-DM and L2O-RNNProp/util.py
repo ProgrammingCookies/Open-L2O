@@ -39,7 +39,9 @@ def get_default_net_config(path):
     }
 
 
-def get_config(problem_name, path=None, mode=None, num_hidden_layer=None, net_name=None):
+def get_config(problem_name, path=None, mode=None, num_hidden_layer=None, net_name=None,
+              lasso_data_dir=None, lasso_split="train_data.npy", lasso_batch_size=128,
+              lasso_lam=0.005):
     """Returns (problem_build_fn, net_config, net_assignments)."""
     if problem_name == "simple":
         problem = problems.simple()
@@ -159,6 +161,18 @@ def get_config(problem_name, path=None, mode=None, num_hidden_layer=None, net_na
 
     elif problem_name == "lasso":
         problem = problems.lasso(batch_size=128, num_dims=2)
+        net_config = {"cw": {
+            "net": "CoordinateWiseDeepLSTM",
+            "net_options": {"layers": (20, 20)},
+            "net_path": path,
+        }}
+        net_assignments = None
+
+    elif problem_name == "lasso_dataset":
+        if lasso_data_dir is None:
+            raise ValueError("problem 'lasso_dataset' requires --lasso_data_dir")
+        problem = problems.lasso_from_dataset(
+            lasso_data_dir, split=lasso_split, batch_size=lasso_batch_size, l=lasso_lam)
         net_config = {"cw": {
             "net": "CoordinateWiseDeepLSTM",
             "net_options": {"layers": (20, 20)},

@@ -169,6 +169,46 @@ def lasso_fixed(data_A, data_b, stddev=0.01, l=0.005, dtype=tf.float32):
     return build
 
 
+def lasso_from_dataset(data_dir, split="train_data.npy", batch_size=128, l=0.005,
+                       stddev=0.01, dtype=tf.float32):
+    """Lasso problem sampled from a pre-generated dataset´.
+    Loads a single shared dictionary A.npy (m, n) and a split file
+    whose shape is [b (m,); x_true (n,)].
+    """
+    a = np.load(os.path.join(data_dir, "A.npy")).astype(np.float32)
+    data = np.load(os.path.join(data_dir, split)).astype(np.float32)
+    m, n = a.shape
+    if data.shape[1] != m + n:
+        raise ValueError(
+            "{} has row width {}, expected {} (= m={} + n={} from {}/A.npy)".format(
+                os.path.join(data_dir, split), data.shape[1], m + n, m, n, data_dir))
+    num_samples = data.shape[0]
+    a_const = tf.constant(a, dtype=dtype)
+
+    def build():
+        idx = np.random.randint(0, num_samples, size=batch_size)
+        batch = data[idx]
+        build.last_x_true = batch[:, m:]
+        build.last_b = batch[:, :m]
+
+        x = tf.Variable(
+            tf.random.normal([batch_size, n], stddev=stddev, dtype=dtype), name="x")
+        b_const = tf.constant(batch[:, :m], dtype=dtype)
+
+        def loss_fn(x_tensors):
+            x_t = x_tensors[0]
+            residual = tf.matmul(x_t, a_const, transpose_b=True) - b_const
+            left_term = 0.5 * tf.reduce_sum(residual ** 2, axis=1)
+            other_term = l * tf.norm(x_t, ord=1, axis=1)
+            return tf.reduce_mean(left_term + other_term)
+
+        return [x], [], loss_fn
+
+    build.last_x_true = None
+    build.last_b = None
+    return build
+
+
 def rastrigin(batch_size=128, num_dims=10, alpha=10, stddev=1, dtype=tf.float32):
     def build():
         x = tf.Variable(

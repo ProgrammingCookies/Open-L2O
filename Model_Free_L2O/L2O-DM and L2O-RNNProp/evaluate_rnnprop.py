@@ -19,6 +19,7 @@ import os
 import pickle
 from timeit import default_timer as timer
 
+import numpy as np
 import tensorflow as tf
 
 import meta_rnnprop_eval as meta
@@ -37,6 +38,12 @@ def parse_args():
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--beta1", type=float, default=0.95)
     p.add_argument("--beta2", type=float, default=0.95)
+    p.add_argument("--lasso_data_dir", default=None,
+                   help="Directory holding A.npy + split .npy files from "
+                        "Benchmarking/data/lasso.py. Required when --problem=lasso_dataset.")
+    p.add_argument("--lasso_split", default="val_data.npy")
+    p.add_argument("--lasso_batch_size", type=int, default=128)
+    p.add_argument("--lasso_lam", type=float, default=0.005)
     return p.parse_args()
 
 
@@ -47,11 +54,15 @@ def main():
         tf.random.set_seed(FLAGS.seed)
 
     problem, net_config, net_assignments = util.get_config(
-        FLAGS.problem, FLAGS.path, net_name="RNNprop")
+        FLAGS.problem, None, net_name="RNNprop", lasso_data_dir=FLAGS.lasso_data_dir,
+        lasso_split=FLAGS.lasso_split, lasso_batch_size=FLAGS.lasso_batch_size,
+        lasso_lam=FLAGS.lasso_lam)
 
     total_time = 0.0
     total_cost = 0.0
     loss_record = []
+    # Final recovered signal (last epoch only)
+    final_x_value = None
 
     for e in range(FLAGS.num_epochs):
         start = timer()
@@ -68,6 +79,7 @@ def main():
                 costs.append(float(loss))
             loss_record.extend(costs)
             total_cost += sum(costs) / FLAGS.num_steps
+            final_x_value = x_vars[0].numpy()
 
         elif FLAGS.optimizer == "L2L":
             optimizer = meta.MetaOptimizer(FLAGS.beta1, FLAGS.beta2, **net_config)
@@ -76,7 +88,7 @@ def main():
             # Load weights if available
             if FLAGS.path is not None:
                 for k, net in optimizer._nets.items():
-                    filename = os.path.join(FLAGS.path, "{}.l2l".format(k))
+                    filename = os.path.join(FLAGS.path, "{}.l2l-0".format(k))
                     if os.path.exists(filename):
                         from networks import load as net_load
                         # Need one forward pass to build the network first
@@ -103,6 +115,7 @@ def main():
 
             loss_record.extend(costs)
             total_cost += sum(costs) / FLAGS.num_steps
+            final_x_value = x[0].numpy()
         else:
             raise ValueError("{} is not a valid optimizer".format(FLAGS.optimizer))
 
@@ -120,6 +133,15 @@ def main():
         with open(output_file, "wb") as f:
             pickle.dump(loss_record, f)
         print("Saving evaluate loss record {}".format(output_file))
+
+        x_true = getattr(problem, "last_x_true", None)
+        b_value = getattr(problem, "last_b", None)
+        if final_x_value is not None and x_true is not None and b_value is not None:
+            recovery_file = os.path.join(
+                FLAGS.output_path,
+                "{}_recovery-{}.npz".format(FLAGS.optimizer, FLAGS.problem))
+            np.savez(recovery_file, x_pred=final_x_value, x_true=x_true, b=b_value)
+            print("Saving recovered signal + ground truth {}".format(recovery_file))
 
 
 if __name__ == "__main__":

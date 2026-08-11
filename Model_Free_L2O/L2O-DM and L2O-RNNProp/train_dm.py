@@ -24,6 +24,7 @@ import tensorflow as tf
 
 from data_generator import data_loader
 import meta_dm_train as meta
+import profiling
 import util
 
 
@@ -35,6 +36,17 @@ def parse_args():
     p.add_argument("--evaluation_epochs", type=int, default=20)
     p.add_argument("--num_steps", type=int, default=100)
     p.add_argument("--unroll_length", type=int, default=20)
+    p.add_argument("--fix_num_unrolls", type=int, default=None,
+                   help="If set, overrides num_steps//unroll_length: total "
+                        "horizon becomes unroll_length * fix_num_unrolls "
+                        "instead of being truncated by integer division of "
+                        "a fixed num_steps.")
+    p.add_argument("--profile_path", default=None,
+                   help="If set, write a per-epoch JSONL trajectory here "
+                        "plus a summary '<stem>_summary.json'.")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seeds random/numpy/TF RNGs before problem/optimizer "
+                        "construction for reproducible training.")
     p.add_argument("--learning_rate", type=float, default=0.001)
     p.add_argument("--second_derivatives", action="store_true")
     p.add_argument("--problem", default="mnist")
@@ -48,17 +60,29 @@ def parse_args():
     p.add_argument("--mt_ratio", type=float, default=0.3)
     p.add_argument("--mt_ratios", default="0.0 0.1 0.3 0.3 0.3 0.3 0.3 0.3")
     p.add_argument("--k", type=int, default=1)
+    p.add_argument("--lasso_data_dir", default=None,
+                   help="Directory holding A.npy + split .npy files from "
+                        "Benchmarking/data/lasso.py. Required when --problem=lasso_dataset.")
+    p.add_argument("--lasso_split", default="train_data.npy")
+    p.add_argument("--lasso_batch_size", type=int, default=128)
+    p.add_argument("--lasso_lam", type=float, default=0.005)
     return p.parse_args()
 
 
 def main():
     FLAGS = parse_args()
+    if FLAGS.seed is not None:
+        random.seed(FLAGS.seed)
+        np.random.seed(FLAGS.seed)
+        tf.random.set_seed(FLAGS.seed)
 
     if FLAGS.if_cl:
         num_steps_sched = [100, 200, 500, 1000, 1500, 2000, 2500, 3000]
         num_unrolls_sched = [ns // FLAGS.unroll_length for ns in num_steps_sched]
         num_unrolls_eval = num_unrolls_sched[1:]
         curriculum_idx = 0
+    elif FLAGS.fix_num_unrolls is not None:
+        num_unrolls = FLAGS.fix_num_unrolls
     else:
         num_unrolls = FLAGS.num_steps // FLAGS.unroll_length
 
@@ -66,7 +90,9 @@ def main():
         os.makedirs(FLAGS.save_path, exist_ok=True)
 
     # Problem + optimizer
-    problem, net_config, net_assignments = util.get_config(FLAGS.problem)
+    problem, net_config, net_assignments = util.get_config(
+        FLAGS.problem, lasso_data_dir=FLAGS.lasso_data_dir, lasso_split=FLAGS.lasso_split,
+        lasso_batch_size=FLAGS.lasso_batch_size, lasso_lam=FLAGS.lasso_lam)
     optimizer = meta.MetaOptimizer(FLAGS.num_mt, **net_config)
     meta_opt = tf.keras.optimizers.Adam(FLAGS.learning_rate)
 
@@ -86,6 +112,8 @@ def main():
     improved = False
     mti = -1
     start_time = timer()
+    profiler = profiling.RunProfiler(FLAGS.profile_path)
+    profiler.start()
 
     for e in range(FLAGS.num_epochs):
         # Refresh problem each epoch (fresh random W, y, etc.)
@@ -124,6 +152,7 @@ def main():
             scale = None
 
         epoch_loss = 0.0
+        grad_norm = None
 
         if task_i == -1:
             for _ in range(num_unrolls_cur):
@@ -131,10 +160,13 @@ def main():
                     loss_fn, x_vars, state, FLAGS.unroll_length,
                     scale=scale,
                     second_derivatives=FLAGS.second_derivatives)
+                grad_norm = float(tf.linalg.global_norm(meta_grads))
                 meta_opt.apply_gradients(zip(meta_grads, net_vars))
                 for var, val in zip(x_vars, x_final):
                     var.assign(val)
                 epoch_loss = float(loss)
+            profiler.log_epoch(e, epoch_loss, grad_norm,
+                               num_optimizee_steps=num_unrolls_cur * FLAGS.unroll_length)
         else:
             data_e = mt_loader.get_data(
                 task_i, num_unrolls_cur,
@@ -148,8 +180,11 @@ def main():
                 labels_mt = data_e["labels"][w]
                 loss, meta_grads, net_vars, mt_state = optimizer.unroll_mt(
                     inputs_mt, labels_mt, mt_state, FLAGS.unroll_length)
+                grad_norm = float(tf.linalg.global_norm(meta_grads))
                 meta_opt.apply_gradients(zip(meta_grads, net_vars))
                 epoch_loss = float(loss)
+            profiler.log_epoch(e, epoch_loss, grad_norm,
+                               num_optimizee_steps=num_unrolls_cur * FLAGS.unroll_length)
 
         print("training_loss={}".format(epoch_loss))
 
@@ -173,6 +208,13 @@ def main():
                     for var, val in zip(ev_x_vars, ev_x_final):
                         var.assign(val)
                     eval_cost += float(loss_val)
+
+            # Overwritten every evaluation so that what's on saved when training
+            # ends is the final evaluation's recovery.
+            if FLAGS.save_path is not None and getattr(problem, "last_x_true", None) is not None:
+                np.savez(
+                    os.path.join(FLAGS.save_path, "recovery.npz"),
+                    x_pred=ev_x_vars[0].numpy(), x_true=problem.last_x_true, b=problem.last_b)
 
             if FLAGS.if_cl:
                 num_steps_cur = num_steps_sched[curriculum_idx]
@@ -222,6 +264,7 @@ def main():
                 print("no improve during curriculum {} --> stop".format(curriculum_idx))
                 break
 
+    profiler.finish()
     print("total time = {}s...".format(timer() - start_time))
 
 

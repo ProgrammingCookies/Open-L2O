@@ -249,11 +249,9 @@ def run(
           loss=loss,
           metrics=test_metrics)
 
-      metrics = model.evaluate(
-          x=val_ds,
-          verbose=2)
 
-      metric_names = model.metrics_names
+      metrics_dict = {name: float(value) for name, value in
+                      model.evaluate(x=val_ds, verbose=2, return_dict=True).items()}
 
       if task == 'lasso':
         output = model.predict(
@@ -264,9 +262,6 @@ def run(
         np.save(os.path.join(model_dir, eval_file_basename + '_final_output.npy'), final_xh)
       else:
         eval_file_basename = os.path.basename(eval_files[i]).replace('.npy', '')
-
-      # Save structured metrics for this eval file
-      metrics_dict = {name: float(value) for name, value in zip(metric_names, metrics)}
 
       save_path = os.path.join(model_dir, eval_file_basename + '_metrics.json')
       with open(save_path, 'w') as f:
