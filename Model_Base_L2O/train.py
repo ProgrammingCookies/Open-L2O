@@ -44,6 +44,10 @@ flags.DEFINE_float('ss_maxq', '13',
 flags.DEFINE_integer('seed', 42, 'The RNG seed for the experiment.')
 flags.DEFINE_float('base_lr', 0.0005, 'The base learning rate.')
 flags.DEFINE_integer('epochs', 100000, 'The total number of epochs of the training process.')
+flags.DEFINE_integer('patience', 8,
+        'EarlyStopping patience (in epochs) for each of the 3 progressive '
+        'per-layer training stages. epochs above is a safety cap only -- '
+        'patience is what actually decides stage length in practice.')
 flags.DEFINE_integer('num_train_images', 51200, 'The total number of training samples.')
 flags.DEFINE_integer('num_val_images', 1024, 'The total number of validation samples.')
 flags.DEFINE_integer('num_test_images', 1024, 'The total number of testing samples.')
@@ -52,6 +56,18 @@ flags.DEFINE_integer('val_batch_size', 1024, 'The batch size for the validation 
 flags.DEFINE_integer('test_batch_size', 1024, 'The batch size for the testing dataset.')
 flags.DEFINE_multi_string('test_files', [], 'Files that are used for testing')
 flags.DEFINE_boolean('test', False, 'Flag that indicates testing will be done')
+# Training-curve instrumentation: evaluate against a fixed held-out test file
+# after every layer finishes training.
+flags.DEFINE_boolean('track_training_curve', False,
+        'If true, evaluate the model against training_curve_test_file after '
+        'each layer finishes training and log the result.')
+flags.DEFINE_string('training_curve_test_file', None,
+        'Test split filename (under data_dir) to evaluate against after '
+        'each layer, e.g. test_sparsity_0.17.npy. Required if '
+        'track_training_curve.')
+flags.DEFINE_string('training_curve_dir', None,
+        'Directory to write training_curve.jsonl + per-layer output .npy '
+        'files to. Defaults to <model_dir>/training_curve.')
 # Exp saving and logging
 flags.DEFINE_string('base_dir', None, 'Base experiment directory.')
 flags.DEFINE_string('data_dir', None, 'Data directory for the experiment.')
@@ -88,6 +104,7 @@ def run(
           'replicate_' + str(FLAGS.replicate))
   log_dir = os.path.join(base_dir, 'logs', FLAGS.exp_name,
           'replicate_' + str(FLAGS.replicate))
+  training_curve_dir = FLAGS.training_curve_dir or os.path.join(model_dir, 'training_curve')
   logging.info('Saving checkpoints at %s', model_dir)
   logging.info('Saving tensorboard summaries at %s', log_dir)
   logging.info('Use training batch size: %s.', train_batch_size)
@@ -119,6 +136,7 @@ def run(
         allow_pickle=True).astype(np.float32)
 
   np.random.seed(FLAGS.seed)
+  tf.random.set_seed(FLAGS.seed)
 
   if mode == 'train':
       train_dataset = data_preprocessing.input_fn(
@@ -239,6 +257,7 @@ def run(
           False,
           data_dir,
           eval_batch_size,
+          task,
           drop_remainder=False,
           A=A,
           filename=eval_files[i])
@@ -282,6 +301,15 @@ def run(
       logging.info('%s : %s', k, str(v))
 
     return
+
+  if FLAGS.track_training_curve:
+    if not FLAGS.training_curve_test_file:
+      raise ValueError('--track_training_curve requires --training_curve_test_file')
+    os.makedirs(training_curve_dir, exist_ok=True)
+    training_curve_ds = data_preprocessing.input_fn(
+        False, data_dir, eval_batch_size, task, drop_remainder=False, A=A,
+        filename=FLAGS.training_curve_test_file)
+    training_curve_path = os.path.join(training_curve_dir, 'training_curve.jsonl')
 
   for layer_id in range(FLAGS.num_layers):
     logging.info('Building Lista Keras model.')
@@ -340,6 +368,7 @@ def run(
         verbose=2)
     logging.info('Finished fitting Lista Keras model.')
     model.summary()
+    stage_epochs = [len(history0.history[monitor])]
 
     for i in range(2):
       logging.info('Compiling model.')
@@ -351,7 +380,7 @@ def run(
       earlystopping_cb = tf.keras.callbacks.EarlyStopping(
           monitor=monitor,
           min_delta=0,
-          patience=5,
+          patience=FLAGS.patience,
           mode='min',
           restore_best_weights=False)
       cbs = [earlystopping_cb]
@@ -366,6 +395,7 @@ def run(
           validation_steps=validation_steps_per_epoch,
           verbose=2)
       logging.info('Finished fitting Lista Keras model.')
+      stage_epochs.append(len(history.history[monitor]))
     model.summary()
     val_metric = history.history[monitor][-1]
     with summary_writer.as_default():
@@ -376,6 +406,23 @@ def run(
       logging.info('Checkpoint saved at %s', utils.save_partial(model_dir, layer_id))
     except tf.errors.NotFoundError:
       pass
+
+    if FLAGS.track_training_curve:
+      curve_metrics = model.evaluate(x=training_curve_ds, verbose=0, return_dict=True)
+      if task == 'lasso':
+        curve_output = model.predict(x=training_curve_ds, verbose=0)[:, -N:]
+        output_fname = 'layer{:02d}_output.npy'.format(layer_id)
+        np.save(os.path.join(training_curve_dir, output_fname), curve_output)
+      else:
+        output_fname = None
+      with open(training_curve_path, 'a') as f:
+        f.write(json.dumps({
+            'layer': layer_id,
+            'stage_epochs': stage_epochs,
+            'output_file': output_fname,
+            **{k: float(v) for k, v in curve_metrics.items()},
+        }) + '\n')
+      logging.info('Training-curve eval at layer %d: %s', layer_id, curve_metrics)
 
   if task == 'cs':
     raise NotImplementedError('Compressive sensing testing part not implemented yet')
