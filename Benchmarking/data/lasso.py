@@ -8,6 +8,11 @@ is the only thing varying across the "narrow"/"medium"/"wide" runs.
 Optionally (``compute_alista_w=True`` / ``--compute_alista_w``,  also generates ALISTA's analytic
 weight matrix W and writes ``W.npy`` alongside ``A.npy`` in every width dir
 see ``compute_alista_w()``'s docstring for the exact LP being solved.
+
+Every split file also gets a seeded ``<name>_x0.npy`` sibling (see
+``_x0_filename()``): the shared starting point every method's recovery
+trajectory begins from, so a given seed produces the same x0 per instance
+regardless of which of the four methods is being trained/evaluated.
 """
 
 from __future__ import annotations
@@ -24,19 +29,19 @@ from scipy.optimize import linprog
 SparsitySpec = Union[float, Tuple[float, float]]
 
 # Default values for Experiment 2
-DEFAULT_M = 210
-DEFAULT_N = 300
+DEFAULT_M = 25
+DEFAULT_N = 50
 DEFAULT_LAM = 0.005
 DEFAULT_TRAIN_SIZE = 32_000
 DEFAULT_VAL_SIZE = 1_024
 DEFAULT_TEST_SIZE = 1_280
-DEFAULT_SNR_DB = 40.0
+DEFAULT_SNR_DB = float("inf")  # noiseless: _add_noise_for_snr's noise_power = signal_power/10**(inf/10) == 0
 DEFAULT_TRAIN_SPARSITIES: Dict[str, SparsitySpec] = {
-    "narrow": 0.1,
-    "medium": (0.075, 0.2),
+    "narrow": 0.175,
+    "medium": (0.1125, 0.2375),
     "wide": (0.05, 0.3),
 }
-DEFAULT_TEST_SPARSITIES: List[float] = [0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.35, 0.40]
+DEFAULT_TEST_SPARSITIES: List[float] = [0.02, 0.05, 0.10, 0.1125, 0.15, 0.175, 0.20, 0.2375, 0.30, 0.35, 0.40]
 
 
 def sample_dictionary(m: int, n: int, rng: np.random.Generator) -> np.ndarray:
@@ -121,9 +126,18 @@ def generate_split(
     num_samples: int,
     sparsity_spec: SparsitySpec,
     snr_db: float,
+    x0_stddev: float,
     rng: np.random.Generator,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Returns (data, p_used), sparsity_used, where data is (num_samples, M+N) rows shape [b; x_true]."""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Generates the LASSO samples as well as the x0 starting points.
+    Returns (data, p_used, x0): data is (num_samples, M+N) rows shape [b; x_true];
+    x0 is (num_samples, N), a dense small-magnitude seeded starting point.
+
+    x0 is what every method's recovery trajectory begins from, which is LISTA/ALISTA's
+    layer 0 and the model-free optimizers' first step both consume it, so for a all four methods start each instance from the identical point
+    (written about in Benchmarking/README.md's "x0 alignment" part).
+    """
     m, n = a.shape
     x_true = np.stack(
         [sample_sparse_signal(n, _draw_p(sparsity_spec, rng), rng) for _ in range(num_samples)],
@@ -133,7 +147,25 @@ def generate_split(
     b_clean = x_true @ a.T  # shape: (num_samples, m)
     b = _add_noise_for_snr(b_clean, snr_db, rng)
     data = np.concatenate([b, x_true], axis=1).astype(np.float32)
-    return data, p_used
+    x0 = rng.normal(loc=0.0, scale=x0_stddev, size=(num_samples, n)).astype(np.float32)
+    return data, p_used, x0
+
+
+def _x0_filename(split_filename: str) -> str:
+    """The seeded-x0 sibling file for a given split file, e.g.
+    'train_data.npy' -> 'train_data_x0.npy'. Kept as a separate file (not
+    extra columns on the split file) so every existing consumer of the split
+    files' [b; x_true] row layout (problems.py's width check,
+    model_based.py's b/x_true slicing, the metadata's documented row_layout)
+    stays untouched.
+
+    Model_Free_L2O/.../problems.py and Model_Base_L2O/data_preprocessing.py
+    both derive this same filename independently -- they're separate
+    processes/environments and can't import this function -- so if this
+    naming rule ever changes, update it in all three places.
+    """
+    assert split_filename.endswith(".npy")
+    return split_filename[:-len(".npy")] + "_x0.npy"
 
 
 @dataclass
@@ -150,6 +182,8 @@ class Experiment2Config:
     train_sparsities: Dict[str, SparsitySpec] = None
     test_sparsities: List[float] = None
     compute_alista_w: bool = False
+    # Shared seeded starting point every method's recovery trajectory.
+    x0_stddev: float = 0.01
 
     def __post_init__(self):
         if self.train_sparsities is None:
@@ -172,6 +206,7 @@ def _dataset_fingerprint(cfg: Experiment2Config) -> Dict[str, Any]:
         "snr_db": cfg.snr_db,
         "train_sparsities": cfg.train_sparsities, "test_sparsities": cfg.test_sparsities,
         "alista_w": cfg.compute_alista_w,
+        "x0_stddev": cfg.x0_stddev,
     }
 
 
@@ -208,9 +243,12 @@ def generate_experiment2_dataset(config: Experiment2Config, out_dir: str) -> str
 
     # Shared test sets with fixed sparsity per file
     test_sets = {}
+    test_x0 = {}
     for p in config.test_sparsities:
-        data, p_used = generate_split(a, config.test_size, p, config.snr_db, rng)
+        data, p_used, x0 = generate_split(a, config.test_size, p, config.snr_db,
+                                          config.x0_stddev, rng)
         test_sets[p] = data
+        test_x0[p] = x0
         assert np.allclose(p_used, p, atol=1.0 / config.n), (
             "test sparsity {} did not round-trip through round(p*n) exactly".format(p))
 
@@ -219,18 +257,24 @@ def generate_experiment2_dataset(config: Experiment2Config, out_dir: str) -> str
         width_dir = os.path.join(seed_dir, width_name)
         os.makedirs(width_dir, exist_ok=True)
 
-        train_data, train_p = generate_split(a, config.train_size, spec, config.snr_db, rng)
-        val_data, _ = generate_split(a, config.val_size, spec, config.snr_db, rng)
+        train_data, train_p, train_x0 = generate_split(
+            a, config.train_size, spec, config.snr_db, config.x0_stddev, rng)
+        val_data, _, val_x0 = generate_split(
+            a, config.val_size, spec, config.snr_db, config.x0_stddev, rng)
         width_p_used[width_name] = train_p
 
         np.save(os.path.join(width_dir, "A.npy"), a)
         if alista_w is not None:
             np.save(os.path.join(width_dir, "W.npy"), alista_w)
         np.save(os.path.join(width_dir, "train_data.npy"), train_data)
+        np.save(os.path.join(width_dir, _x0_filename("train_data.npy")), train_x0)
         np.save(os.path.join(width_dir, "val_data.npy"), val_data)
+        np.save(os.path.join(width_dir, _x0_filename("val_data.npy")), val_x0)
         np.save(os.path.join(width_dir, "train_sparsity_used.npy"), train_p)
         for p, data in test_sets.items():
-            np.save(os.path.join(width_dir, _test_filename(p)), data)
+            fname = _test_filename(p)
+            np.save(os.path.join(width_dir, fname), data)
+            np.save(os.path.join(width_dir, _x0_filename(fname)), test_x0[p])
 
     metadata = {
         "seed": config.seed,
@@ -249,6 +293,11 @@ def generate_experiment2_dataset(config: Experiment2Config, out_dir: str) -> str
         "noise_convention": "per-instance additive Gaussian noise at fixed SNR (dB) on b",
         "row_layout": "[b (M,); x_true (N,)], length M+N matches "
                        "Model_Base_L2O/utils.py's LassoObjective/NMSE slicing",
+        "x0_stddev": config.x0_stddev,
+        "x0_layout": "each split file <name>.npy has a sibling <name>_x0.npy, "
+                     "shape (num_samples, N) -- the seeded starting point "
+                     "every method's recovery trajectory begins from, see "
+                     "README's 'x0 alignment' decision",
         "test_files": [_test_filename(p) for p in config.test_sparsities],
         "train_sparsity_mean_actual": {
             w: float(np.mean(p)) for w, p in width_p_used.items()
@@ -277,6 +326,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--snr_db", type=float, default=DEFAULT_SNR_DB)
     p.add_argument("--compute_alista_w", action="store_true",
                    help="Also solve the ALISTA analytic-weight LP and write W. Off by default.")
+    p.add_argument("--x0_stddev", type=float, default=0.01,
+                   help="Stddev of the shared seeded x0 every method's recovery "
+                        "trajectory starts from.")
     return p.parse_args()
 
 
@@ -287,6 +339,7 @@ def main() -> None:
             seed=seed, m=args.m, n=args.n, lam=args.lam,
             train_size=args.train_size, val_size=args.val_size, test_size=args.test_size,
             snr_db=args.snr_db, compute_alista_w=args.compute_alista_w,
+            x0_stddev=args.x0_stddev,
         )
         seed_dir = generate_experiment2_dataset(cfg, args.out_dir)
         print("seed {}: wrote {}".format(seed, seed_dir))

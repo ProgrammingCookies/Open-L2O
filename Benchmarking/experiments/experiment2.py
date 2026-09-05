@@ -68,9 +68,9 @@ class OrchestratorConfig:
     test_sparsities: List[float] = field(default_factory=lambda: list(DEFAULT_TEST_SPARSITIES))
     snr_db: float = 40.0
 
-    # Training-budget placeholders.
-    model_free_num_epochs: int = 2000
-    model_free_num_steps: int = 100
+    # Model-free (L2O-DM / L2O-RNNProp) training budget.
+    model_free_num_epochs: int = 100
+    model_free_num_steps: int = 1_000
     model_free_unroll_length: int = 20
     model_free_batch_size: int = 128
     model_free_eval_num_steps: int = 200

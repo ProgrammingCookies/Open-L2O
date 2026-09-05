@@ -27,13 +27,9 @@ class AlistaCell(keras.layers.Layer):
     self.layer_id = layer_id
 
   def call(self, inputs):
-    if self.layer_id == 0:
-      res = inputs[:, :self._M]
-      xk = 0.0
-    else:
-      y = inputs[:, :self._M]
-      xk = inputs[:, -self._N:]
-      res = y - tf.matmul(xk, self._A, transpose_b=True)
+    y = inputs[:, :self._M]
+    xk = inputs[:, -self._N:]
+    res = y - tf.matmul(xk, self._A, transpose_b=True)
     output = xk + self.step_size * tf.matmul(res, self._W, transpose_b=False)
     output = shrink_ss(output, self.theta, self.q)
     return tf.concat([inputs, output], 1)
@@ -65,19 +61,21 @@ class Alista(keras.Sequential):
     self.q = np.clip([(t+1) * q_per_layer for t in range(self._T)], 0.0, maxq)
     print(self.q)
 
+    # keras.Variable, not tf.Variable: Keras 3 as it does not
+    #  auto-track bare tf.Variable attributes as layer weights anymore.
     self.theta = [
-        tf.Variable(self._theta, trainable=True, name=name + "_theta" + str(i + 1))
+        keras.Variable(self._theta, trainable=True, name=name + "_theta" + str(i + 1))
         for i in range(self._T)
     ]
     self.step_size = [
-        tf.Variable(1.0, trainable=True, name=name + "_step_size" + str(i + 1))
+        keras.Variable(1.0, trainable=True, name=name + "_step_size" + str(i + 1))
         for i in range(self._T)
     ]
 
     if D is not None:
       self._D = D
-      self._W_D_constant = tf.Variable(self._D, trainable=False, name=name + "_W_D_constant")
-      self._W_D = tf.Variable(self._D, trainable=True, name=name + "_W_D")
+      self._W_D_constant = keras.Variable(self._D, trainable=False, name=name + "_W_D_constant")
+      self._W_D = keras.Variable(self._D, trainable=True, name=name + "_W_D")
     else:
       self._D = None
       self._W_D = None
