@@ -68,6 +68,10 @@ def parse_args():
     p.add_argument("--lasso_split", default="train_data.npy")
     p.add_argument("--lasso_batch_size", type=int, default=128)
     p.add_argument("--lasso_lam", type=float, default=0.005)
+    p.add_argument("--lasso_x0_mode", default="aligned", choices=["aligned", "random"],
+                   help="'aligned' (default) requires the dataset's seeded x0 "
+                        "sibling files. 'random' draws a fresh N(0,x0_stddev^2) "
+                        "init each call instead so no x0 files required.")
     return p.parse_args()
 
 
@@ -94,7 +98,7 @@ def main():
     problem, net_config, net_assignments = util.get_config(
         FLAGS.problem, net_name="RNNprop", lasso_data_dir=FLAGS.lasso_data_dir,
         lasso_split=FLAGS.lasso_split, lasso_batch_size=FLAGS.lasso_batch_size,
-        lasso_lam=FLAGS.lasso_lam)
+        lasso_lam=FLAGS.lasso_lam, lasso_x0_mode=FLAGS.lasso_x0_mode)
     optimizer = meta.MetaOptimizer(FLAGS.num_mt, FLAGS.beta1, FLAGS.beta2, **net_config)
     meta_opt = tf.keras.optimizers.Adam(FLAGS.learning_rate)
 
