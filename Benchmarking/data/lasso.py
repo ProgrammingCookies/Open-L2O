@@ -112,6 +112,24 @@ def sample_sparse_signal(n: int, p: float, rng: np.random.Generator) -> np.ndarr
     return x
 
 
+def sample_sparse_signal_bernoulli(n: int, p: float, rng: np.random.Generator) -> np.ndarray:
+    """i.i.d. Ber(p)*N(0,1) per coordinate -- nonzero count varies per
+    instance (binomial, mean p*n), matching Chen et al.'s primer/JMLR-paper
+    ("Learning to Optimize: A Primer and a Benchmark") sections 4.1.1/4.1.2's
+    own stated sparsity model. Deliberately different from
+    sample_sparse_signal's exact-round(p*n)-count convention, which is
+    Experiment 2's own dataset-generator design decision (see
+    project_lasso_generator memory), not what the primer paper itself does --
+    use this one specifically when replicating the paper's own protocol.
+    """
+    mask = rng.random(n) < p
+    x = np.zeros(n, dtype=np.float32)
+    k = int(mask.sum())
+    if k > 0:
+        x[mask] = rng.normal(loc=0.0, scale=1.0, size=k).astype(np.float32)
+    return x
+
+
 def _add_noise_for_snr(b_clean: np.ndarray, snr_db: float, rng: np.random.Generator) -> np.ndarray:
     """Per-instance additive Gaussian noise calibrated to the given signal ratio (in dB)."""
     signal_power = np.mean(b_clean ** 2, axis=-1, keepdims=True)
@@ -305,6 +323,70 @@ def generate_experiment2_dataset(config: Experiment2Config, out_dir: str) -> str
         "alista_w": config.compute_alista_w,
         "alista_w_method": ("per-column mutual-coherence-minimization LP "
                             "(scipy.optimize.linprog, HiGHS)" if config.compute_alista_w else None),
+    }
+    with open(os.path.join(seed_dir, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    return seed_dir
+
+
+def generate_primer_lasso_dataset(
+    seed: int, m: int, n: int, lam: float, p: float,
+    train_size: int, val_size: int, test_size: int, snr_db: float,
+    out_dir: str,
+) -> str:
+    """Flat (no narrow/medium/wide width triad) LASSO dataset replicating
+    Chen et al.'s primer/JMLR-paper ("Learning to Optimize: A Primer and a
+    Benchmark") section 4.1.2 exactly: a single fixed Bernoulli(p) sparsity
+    shared by train/val/test (the width/OOD axis is a DA233X pre-study
+    addition, not present in the primer's own experiment), i.i.d. Bernoulli
+    sparsity per sample_sparse_signal_bernoulli (not Experiment 2's
+    exact-round(p*n)-count convention), and no x0 sibling files -- this
+    dataset is meant to be consumed with
+    Model_Free_L2O/.../problems.py's lasso_from_dataset(x0_mode="random"),
+    matching the paper's own "average over 10 random starting points"
+    evaluation protocol rather than Experiment 2's cross-method x0 alignment.
+
+    Writes A.npy, train_data.npy, val_data.npy, test_data.npy (single file,
+    not one per test sparsity), metadata.json, directly under
+    out_dir/seed{seed}/ (no width subdirectory).
+    """
+    rng = np.random.default_rng(seed)
+    a = sample_dictionary(m, n, rng)
+    seed_dir = os.path.join(out_dir, "seed{}".format(seed))
+    os.makedirs(seed_dir, exist_ok=True)
+
+    def _gen(num_samples: int) -> np.ndarray:
+        x_true = np.stack(
+            [sample_sparse_signal_bernoulli(n, p, rng) for _ in range(num_samples)], axis=0)
+        b_clean = x_true @ a.T
+        b = _add_noise_for_snr(b_clean, snr_db, rng)
+        return np.concatenate([b, x_true], axis=1).astype(np.float32)
+
+    train_data = _gen(train_size)
+    val_data = _gen(val_size)
+    test_data = _gen(test_size)
+
+    np.save(os.path.join(seed_dir, "A.npy"), a)
+    np.save(os.path.join(seed_dir, "train_data.npy"), train_data)
+    np.save(os.path.join(seed_dir, "val_data.npy"), val_data)
+    np.save(os.path.join(seed_dir, "test_data.npy"), test_data)
+
+    metadata = {
+        "seed": seed, "m": m, "n": n, "lam": lam, "sparsity_p": p,
+        "train_size": train_size, "val_size": val_size, "test_size": test_size,
+        "snr_db": snr_db,
+        "sparsity_model": "i.i.d. Ber(p)*N(0,1) per coordinate, count varies "
+                          "per instance -- Chen et al. primer/JMLR-paper "
+                          "sections 4.1.1/4.1.2's own stated convention "
+                          "(NOT Experiment 2's exact-round(p*n)-count model)",
+        "row_layout": "[b (M,); x_true (N,)], length M+N",
+        "note": "Replicates Chen et al. 'Learning to Optimize: A Primer and a "
+                "Benchmark' (JMLR 2022) section 4.1.2's LASSO-minimization "
+                "experiment: single fixed sparsity (no width/OOD axis), "
+                "Bernoulli sparsity, train_size=12800 (paper-stated, not "
+                "Table 3's 32000). No x0 sibling files -- see "
+                "problems.lasso_from_dataset(x0_mode='random').",
     }
     with open(os.path.join(seed_dir, "metadata.json"), "w") as f:
         json.dump(metadata, f, indent=2)
