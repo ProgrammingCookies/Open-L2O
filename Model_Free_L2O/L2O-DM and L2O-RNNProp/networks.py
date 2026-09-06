@@ -15,6 +15,7 @@
 """Learning 2 Learn meta-optimizer networks."""
 
 import abc
+import re
 import sys
 
 import dill as pickle
@@ -34,9 +35,86 @@ def factory(net, net_options=(), net_path=None):
     return net_class(**net_options)
 
 
+# Weight dicts are keyed "<index>:<name>", NOT by name alone.
+#
+# Under Keras 3 `v.name` is the BARE variable name ("kernel", "bias",
+# "recurrent_kernel") rather than TF1/Sonnet's unique scoped path
+# ("deep_lstm/lstm_1/kernel:0"), so names are NOT unique within a network: a
+# 2-layer LSTM + Dense head has four variables named "kernel" and four named
+# "bias". The previous `{v.name: ...}` comprehension therefore collided on both
+# save and load, silently collapsing 10 tensors to 3 -- a restored optimizer
+# kept ~70% of its random initialisation with no error raised. Prefixing the
+# index makes the key unique and order-stable, and the checks below make any
+# future mismatch fail loudly instead of silently under-restoring.
+_INDEXED_KEY_RE = re.compile(r"^\d+:")
+
+
+def _weight_key(index, variable):
+    return "{}:{}".format(index, variable.name)
+
+
+def _check_shape(source, key, value, variable):
+    if tuple(np.shape(value)) != tuple(variable.shape):
+        raise RuntimeError(
+            "{}: weight {!r} has shape {} but the network variable has shape "
+            "{}.".format(source, key, np.shape(value), tuple(variable.shape)))
+
+
+def _assign_saved_weights(variables, saved, source):
+    """Assign a saved weight dict into `variables`, or raise.
+
+    Accepts both the indexed format written by `save` and the legacy
+    bare-name format -- but a legacy dict is only used when it is provably
+    COMPLETE (unique names, one entry per variable). A legacy dict written for
+    a network with duplicate variable names lost tensors at save time and is
+    unrecoverable, so it is rejected loudly rather than silently restoring a
+    fraction of the weights.
+    """
+    variables = list(variables)
+    if saved and all(_INDEXED_KEY_RE.match(k) for k in saved):
+        if len(saved) != len(variables):
+            raise RuntimeError(
+                "{} holds {} weight tensors but the network has {}.".format(
+                    source, len(saved), len(variables)))
+        for i, v in enumerate(variables):
+            key = _weight_key(i, v)
+            if key not in saved:
+                raise RuntimeError(
+                    "{} is missing weight {!r} (network variable {} of {}).".format(
+                        source, key, i, len(variables)))
+            _check_shape(source, key, saved[key], v)
+            v.assign(saved[key])
+        return
+
+    names = [v.name for v in variables]
+    duplicates = len(set(names)) != len(names)
+    missing = [n for n in names if n not in saved]
+    if duplicates or missing or len(saved) != len(variables):
+        raise RuntimeError(
+            "{} holds a legacy weight dict keyed by bare variable name, with {} "
+            "entries for a network of {} tensors{}. Under Keras 3 `v.name` is "
+            "not unique within a network, so such a dict silently dropped every "
+            "colliding tensor when it was written -- the missing weights were "
+            "never saved and cannot be restored. Retrain to regenerate this "
+            "checkpoint.".format(
+                source, len(saved), len(variables),
+                " (duplicate variable names: {})".format(
+                    sorted({n for n in names if names.count(n) > 1}))
+                if duplicates else ""))
+    for v in variables:
+        _check_shape(source, v.name, saved[v.name], v)
+        v.assign(saved[v.name])
+
+
 def save(network, filename=None):
     """Save the variables contained by a network to disk."""
-    to_save = {v.name: v.numpy() for v in network.trainable_variables}
+    variables = list(network.trainable_variables)
+    to_save = {_weight_key(i, v): v.numpy() for i, v in enumerate(variables)}
+    if len(to_save) != len(variables):
+        raise RuntimeError(
+            "refusing to save an incomplete checkpoint: {} keys for {} "
+            "trainable variables (duplicate keys would be silently dropped)."
+            .format(len(to_save), len(variables)))
     if filename:
         with open(filename, "wb") as f:
             pickle.dump(to_save, f)
@@ -47,10 +125,7 @@ def load(network, filename):
     """Load saved weights into a network (must be called after first forward pass)."""
     with open(filename, "rb") as f:
         saved = pickle.load(f)
-    var_by_name = {v.name: v for v in network.trainable_variables}
-    for name, value in saved.items():
-        if name in var_by_name:
-            var_by_name[name].assign(value)
+    _assign_saved_weights(network.trainable_variables, saved, filename)
 
 
 class Network(tf.keras.layers.Layer, abc.ABC):
@@ -96,10 +171,11 @@ class StandardDeepLSTM(Network):
 
     def _maybe_load_weights(self):
         if self._initializer is not None and not self._built_once and isinstance(self._initializer, dict):
-            var_by_name = {v.name: v for v in self.trainable_variables}
-            for name, value in self._initializer.items():
-                if name in var_by_name:
-                    var_by_name[name].assign(value)
+            # Same indexed-key contract as networks.save/load -- see the comment
+            # on _weight_key for why keying by v.name alone silently drops most
+            # of the tensors under Keras 3.
+            _assign_saved_weights(self.trainable_variables, self._initializer,
+                                  "the initializer passed to {}".format(type(self).__name__))
             self._built_once = True
 
     def call(self, inputs, state):

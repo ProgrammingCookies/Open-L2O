@@ -38,9 +38,80 @@ Two independent call surfaces, both delegating to the same
 """
 
 import dill
+import re
 import tensorflow as tf
 
 EPSILON = 1e-6
+
+# Weight dicts are keyed "<index>:<name>", NOT by name alone.
+#
+# Under Keras 3 `v.name` is the BARE variable name rather than TF1's unique
+# scoped path, so names are not guaranteed unique within an optimizer: any two
+# RNN cells of the same class contribute identically-named variables (e.g.
+# "Matrix"/"Bias"). A `{v.name: ...}` dict therefore collides on both save and
+# load, silently dropping every colliding tensor with no error raised, so a
+# restored optimizer keeps part of its random initialisation. Prefixing the
+# index makes the key unique and order-stable, and the checks below make any
+# mismatch fail loudly instead of silently under-restoring.
+_INDEXED_KEY_RE = re.compile(r"^\d+:")
+
+
+def _weight_key(index, variable):
+    return "{}:{}".format(index, variable.name)
+
+
+def _check_shape(source, key, value, variable):
+    if tuple(getattr(value, "shape", ())) != tuple(variable.shape):
+        raise RuntimeError(
+            "{}: weight {!r} has shape {} but the optimizer variable has shape "
+            "{}.".format(source, key, getattr(value, "shape", None),
+                         tuple(variable.shape)))
+
+
+def _assign_saved_weights(variables, saved, source):
+    """Assign a saved weight dict into `variables`, or raise.
+
+    Accepts both the indexed format written by `save` and the legacy bare-name
+    format -- but a legacy dict is only used when it is provably COMPLETE
+    (unique names, one entry per variable), so pre-existing checkpoints whose
+    names happened not to collide keep loading. A legacy dict written for an
+    optimizer with duplicate variable names lost tensors at save time and is
+    unrecoverable, so it is rejected loudly rather than silently restoring a
+    fraction of the weights.
+    """
+    variables = list(variables)
+    if saved and all(_INDEXED_KEY_RE.match(k) for k in saved):
+        if len(saved) != len(variables):
+            raise RuntimeError(
+                "{} holds {} weight tensors but the optimizer has {}.".format(
+                    source, len(saved), len(variables)))
+        for i, v in enumerate(variables):
+            key = _weight_key(i, v)
+            if key not in saved:
+                raise RuntimeError(
+                    "{} is missing weight {!r} (variable {} of {}).".format(
+                        source, key, i, len(variables)))
+            _check_shape(source, key, saved[key], v)
+            v.assign(saved[key])
+        return
+
+    names = [v.name for v in variables]
+    duplicates = len(set(names)) != len(names)
+    missing = [n for n in names if n not in saved]
+    if duplicates or missing or len(saved) != len(variables):
+        raise RuntimeError(
+            "{} holds a legacy weight dict keyed by bare variable name, with {} "
+            "entries for an optimizer of {} tensors{}. Under Keras 3 `v.name` is "
+            "not unique, so such a dict silently dropped every colliding tensor "
+            "when it was written -- the missing weights were never saved and "
+            "cannot be restored. Retrain to regenerate this checkpoint.".format(
+                source, len(saved), len(variables),
+                " (duplicate variable names: {})".format(
+                    sorted({n for n in names if names.count(n) > 1}))
+                if duplicates else ""))
+    for v in variables:
+        _check_shape(source, v.name, saved[v.name], v)
+        v.assign(saved[v.name])
 
 
 class TrainableOptimizer:
@@ -446,7 +517,13 @@ class TrainableOptimizer:
 
     def save(self, path=None):
         """Saves the optimizer's own trainable weights to disk."""
-        result = {v.name: v.numpy() for v in self.trainable_variables}
+        variables = list(self.trainable_variables)
+        result = {_weight_key(i, v): v.numpy() for i, v in enumerate(variables)}
+        if len(result) != len(variables):
+            raise RuntimeError(
+                "refusing to save an incomplete checkpoint: {} keys for {} "
+                "trainable variables (duplicate keys would be silently dropped)."
+                .format(len(result), len(variables)))
         if path:
             with open(path, "wb") as f:
                 dill.dump(result, f)
@@ -457,7 +534,4 @@ class TrainableOptimizer:
         sub-layers have been built at least once -- see subclass docs)."""
         with open(path, "rb") as f:
             saved = dill.load(f)
-        var_by_name = {v.name: v for v in self.trainable_variables}
-        for name, value in saved.items():
-            if name in var_by_name:
-                var_by_name[name].assign(value)
+        _assign_saved_weights(self.trainable_variables, saved, path)
