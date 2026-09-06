@@ -113,6 +113,20 @@ def quadratic_problems_large():
     ]
 
 
+def lasso_problems(data_dir, split="train_data.npy", batch_size=128, lam=0.005):
+    """A single LASSO problem instance drawn from a pre-generated dataset
+    (see Benchmarking/data/lasso.py) -- used by Experiment 1's
+    --include_lasso_problems. dataset=None/batch_size=None since pg.Lasso
+    draws its own fixed (b, x_true) batch at construction time rather than
+    pulling from datasets.Dataset's batch_indices() mechanism.
+    """
+    return [
+        (_Spec(pg.Lasso, (data_dir,),
+               {"split": split, "batch_size": batch_size, "lam": lam}),
+         None, None),
+    ]
+
+
 def bowl_problems():
     return [
         (_Spec(pg.Bowl, (0.1,), {"noise_stdev": 0.0}), None, None),

@@ -44,6 +44,7 @@ from collections import defaultdict
 import numpy as np
 import tensorflow as tf
 
+import profiling
 from optimizer import utils
 from problems import datasets
 from problems import problem_generator
@@ -147,7 +148,8 @@ def train_optimizer(logdir,
                     l2_reg=0.,
                     rms_decay=0.9,
                     rms_epsilon=1e-20,
-                    reset_rnn_params=True):
+                    reset_rnn_params=True,
+                    profile_path=None):
     """Trains the meta-parameters of this optimizer.
 
     Args:
@@ -199,6 +201,10 @@ def train_optimizer(logdir,
     opt = optimizer_spec.build()
     meta_opt = tf.keras.optimizers.RMSprop(
         learning_rate, rho=rms_decay, epsilon=rms_epsilon)
+
+    profiler = profiling.RunProfiler(profile_path)
+    profiler.start()
+    global_step = 0
 
     for problem_itr, (problem_spec, dataset, batch_size) in enumerate(sampler):
         print("problem {}".format(problem_itr))
@@ -252,11 +258,21 @@ def train_optimizer(logdir,
                     total_loss = meta_obj + reg_l2
 
                 grads = meta_tape.gradient(total_loss, meta_params)
+                raw_grad_norm = float(tf.linalg.global_norm(
+                    [g for g in grads if g is not None]))
                 clipped_grads_and_vars = [
                     (tf.clip_by_value(utils.make_finite(g, tf.zeros_like(v)),
                                       -gradient_clip, gradient_clip), v)
                     for g, v in zip(grads, meta_params) if g is not None]
+                # clip_by_value clips each element independently, so this post-clip norm tells you
+                # about per-element magnitude saturation against gradient_clip.
+                post_clip_grad_norm = float(tf.linalg.global_norm(
+                    [g for g, _ in clipped_grads_and_vars]))
                 meta_opt.apply_gradients(clipped_grads_and_vars)
+                profiler.log_epoch(
+                    global_step, float(total_loss), raw_grad_norm, post_clip_grad_norm,
+                    num_optimizee_steps=partial_unroll_iters[unroll_itr])
+                global_step += 1
 
                 sub_obj_np = np.array([float(v) for v in sub_obj])
                 if np.any(sub_obj_np < 0):
@@ -286,6 +302,19 @@ def train_optimizer(logdir,
                 print("evaluation {}, cost={}".format(
                     (k + 1) // evaluation_period, cost), flush=True)
 
+                # _validate's last call left opt._params at that restart's
+                # final point -- for a Lasso problem (fixed A/b/x_true, see
+                # problems/problem_generator.py's pg.Lasso) this is exactly
+                # the x_pred Experiment 1's modified relative loss (Eq 10)
+                # needs. Overwritten every evaluation, so what's on disk
+                # when training ends is the final evaluation's recovery.
+                if logdir is not None and hasattr(problem, "x_true"):
+                    np.savez(
+                        os.path.join(logdir, "recovery.npz"),
+                        x_pred=opt._params[0].numpy(),
+                        x_true=problem.x_true,
+                        b=problem.b.numpy())
+
                 if logdir is not None and cost < best_evaluation:
                     best_evaluation = cost
                     opt.save(os.path.join(logdir, "model-best.l2o"))
@@ -300,6 +329,8 @@ def train_optimizer(logdir,
 
         if logdir is not None:
             opt.save(os.path.join(logdir, "model-final.l2o"))
+
+    profiler.finish()
 
 
 def test_optimizer(optimizer,

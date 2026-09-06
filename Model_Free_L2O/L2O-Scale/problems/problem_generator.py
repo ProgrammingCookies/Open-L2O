@@ -30,6 +30,8 @@ objective()/gradients() the same way.
 Test functions for optimization: http://www.sfu.ca/~ssurjano/optimization.html
 """
 
+import os
+
 import numpy as np
 import tensorflow as tf
 
@@ -149,6 +151,62 @@ class Quadratic(Problem):
     def objective(self, params, data=None, labels=None):
         """Quadratic objective (see base class for details)."""
         return tf.nn.l2_loss(tf.matmul(self.w, params[0]) - self.y)
+
+
+class Lasso(Problem):
+    """LASSO problem sampled from a pre-generated dataset (see
+    ``Benchmarking/data/lasso.py``. Loads a shared dictionary ``A.npy`` (m, n) and a split
+    file whose rows are ``[b (m,); x_true (n,)]`` -- same file layout as
+    ``Model_Free_L2O/.../problems.py``'s ``lasso_from_dataset`` -- and
+    fixes ONE random batch of (b, x_true) pairs at construction time,
+    consistent with how every other Problem here (e.g. Quadratic's w/y)
+    draws its random instance once in __init__ rather than resampling
+    every meta-iteration.
+
+    ``param_shapes`` packs ``batch_size`` parallel LASSO instances into a
+    single (batch_size, n) parameter tensor, sharing one (m, n) dictionary
+    A rather than tiling it per-instance.
+
+    ``x_true``/``b``/``a`` are stashed as plain attributes (not part of
+    ``param_shapes``, since they aren't optimizee state) so that
+    ``metaopt.train_optimizer``'s evaluation block can pair them with the
+    final evaluated params to compute Experiment 1's modified relative
+    loss (Eq 10) without needing a separate eval script.
+    """
+
+    def __init__(self, data_dir, split="train_data.npy", batch_size=128,
+                lam=0.005, random_seed=None, noise_stdev=0.0):
+        a = np.load(os.path.join(data_dir, "A.npy")).astype(np.float32)
+        data = np.load(os.path.join(data_dir, split)).astype(np.float32)
+        m, n = a.shape
+        if data.shape[1] != m + n:
+            raise ValueError(
+                "{} has row width {}, expected {} (= m={} + n={} from {}/A.npy)".format(
+                    os.path.join(data_dir, split), data.shape[1], m + n, m, n, data_dir))
+
+        param_shapes = [(batch_size, n)]
+        super().__init__(param_shapes, random_seed, noise_stdev)
+
+        idx = np.random.randint(0, data.shape[0], size=batch_size)
+        batch = data[idx]
+        self.a = tf.constant(a, dtype=tf.float32)
+        self.b = tf.constant(batch[:, :m], dtype=tf.float32)
+        self.x_true = batch[:, m:]
+        self.lam = lam
+
+    def init_tensors(self, seed=None):
+        # Match Model_Free_L2O/.../problems.py's lasso_from_dataset init
+        # scale (stddev=0.01), not the base class's N(0,1), so all three
+        # for Experiment-1 methods start from a comparable initial point.
+        return [tf.random.normal(shape, stddev=0.01, seed=seed)
+                for shape in self.param_shapes]
+
+    def objective(self, params, data=None, labels=None):
+        x = params[0]
+        residual = tf.matmul(x, self.a, transpose_b=True) - self.b
+        left_term = 0.5 * tf.reduce_sum(residual ** 2, axis=1)
+        other_term = self.lam * tf.reduce_sum(tf.abs(x), axis=1)
+        return tf.reduce_mean(left_term + other_term)
 
 
 class SoftmaxClassifier(Problem):
