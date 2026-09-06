@@ -125,6 +125,8 @@ def parse_args():
     p.add_argument("--model_name", default="mt")
     p.add_argument("--restore_model_name", default="model-final.l2o",
                    help="Checkpoint filename (relative to --train_dir/<optimizer dir>) to load.")
+    p.add_argument("--seed", type=int, default=None,
+                   help="If given, evaluate on just this seed instead of the default ".")
     return p.parse_args()
 
 
@@ -216,7 +218,7 @@ def main():
         problem = problem_spec_.build()
         problem_name = FLAGS.train_dir.split("/")[0]
 
-        for seed in [6, 12, 18, 24, 30]:
+        for seed in ([FLAGS.seed] if FLAGS.seed is not None else [6, 12, 18, 24, 30]):
             print("testing problem {} ({}) using seed {}".format(
                 problem_itr, problem_name, seed))
 
@@ -257,7 +259,7 @@ def main():
             adapt_problems_and_data):
         problem = problem_spec_.build()
 
-        for seed in [6, 12, 18, 24, 30]:
+        for seed in ([FLAGS.seed] if FLAGS.seed is not None else [6, 12, 18, 24, 30]):
             print("adapt-evaluating problem {} using seed {}".format(problem_itr, seed))
 
             if FLAGS.test_optimizer == "L2o":

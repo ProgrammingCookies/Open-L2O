@@ -17,7 +17,9 @@
 
 import argparse
 import os
+import random
 
+import numpy as np
 import tensorflow as tf
 
 import metaopt
@@ -177,11 +179,18 @@ def parse_args():
                    choices=["layer_wise", "params_wise", "fix_num"])
     p.add_argument("--random_sparse_prob", default="1.0",
                    help="Space-separated list of per-tensor keep-probabilities, e.g. \"0.1 0.3 0.5\".")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seeds numpy/TF RNGs before problem/optimizer construction for "
+                        "reproducible training.")
     return p.parse_args()
 
 
 def main():
     FLAGS = parse_args()
+    if FLAGS.seed is not None:
+        random.seed(FLAGS.seed)
+        np.random.seed(FLAGS.seed)
+        tf.random.set_seed(FLAGS.seed)
     opts = register_optimizers()
 
     # Choose a set of problems to optimize. By default this includes quadratics,

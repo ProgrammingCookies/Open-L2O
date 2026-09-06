@@ -146,11 +146,18 @@ def parse_args():
     p.add_argument("--evaluation_period", type=int, default=1)
     p.add_argument("--evaluation_epochs", type=int, default=20)
     p.add_argument("--save_period", type=int, default=1)
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seeds numpy/TF RNGs before problem/optimizer construction for "
+                        "reproducible training.")
     return p.parse_args()
 
 
 def main():
     FLAGS = parse_args()
+    if FLAGS.seed is not None:
+        random.seed(FLAGS.seed)
+        np.random.seed(FLAGS.seed)
+        tf.random.set_seed(FLAGS.seed)
     opts = register_optimizers()
 
     # Choose a set of problems to optimize. By default this includes quadratics,
