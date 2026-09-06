@@ -56,8 +56,6 @@ flags.DEFINE_integer('val_batch_size', 1024, 'The batch size for the validation 
 flags.DEFINE_integer('test_batch_size', 1024, 'The batch size for the testing dataset.')
 flags.DEFINE_multi_string('test_files', [], 'Files that are used for testing')
 flags.DEFINE_boolean('test', False, 'Flag that indicates testing will be done')
-# Training-curve instrumentation: evaluate against a fixed held-out test file
-# after every layer finishes training.
 flags.DEFINE_boolean('track_training_curve', False,
         'If true, evaluate the model against training_curve_test_file after '
         'each layer finishes training and log the result.')

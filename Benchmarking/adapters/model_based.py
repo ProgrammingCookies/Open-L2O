@@ -150,12 +150,24 @@ class ModelBasedMethod(L2OMethod):
         flags["data_dir"] = data_dir
         flags["base_dir"] = base_dir
 
+        model_dir = self._model_dir(base_dir, config)
+        artifacts = {"train_log": os.path.join(output_dir, "train.log")}
+        if train_overrides.get("track_training_curve") and "training_curve_dir" not in train_overrides:
+            # Same default train.py itself would pick (<model_dir>/training_curve),
+            # made explicit here so the artifact path below is guaranteed correct
+            # rather than using train.py's default.
+            training_curve_dir = os.path.join(model_dir, "training_curve")
+            flags["training_curve_dir"] = training_curve_dir
+        if train_overrides.get("track_training_curve"):
+            artifacts["training_curve"] = os.path.join(
+                flags["training_curve_dir"], "training_curve.jsonl")
+
         cmd = run_script(self.lib_dir, "train.py", flags,
                          log_path=os.path.join(output_dir, "train.log"))
         return TrainOutput(
             checkpoint=base_dir,
-            metrics={"model_dir": self._model_dir(base_dir, config)},
-            artifacts={"train_log": os.path.join(output_dir, "train.log")},
+            metrics={"model_dir": model_dir},
+            artifacts=artifacts,
             command=cmd,
         )
 
