@@ -11,6 +11,9 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+# Certified-duality-gap stopping tolerance. Hard coded.
+_GAP_TOL = 1e-10
+_GAP_CHECK_EVERY = 25
 
 def soft_threshold(z: np.ndarray, thresh: float) -> np.ndarray:
     """S_eta(z) = sign(z) * max(|z| - eta, 0) : pre-study Eq 2."""

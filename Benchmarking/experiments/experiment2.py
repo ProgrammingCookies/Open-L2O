@@ -79,8 +79,8 @@ class OrchestratorConfig:
     model_based_num_layers: int = 16
     model_based_epochs: int = 200
 
-    # "2000 iterations of FISTA" like primer and benchmark uses.
-    num_fista_iters: int = 2000
+    # Reference x* solve for the recovery metrics (core/lasso_metrics.py).
+    num_fista_iters: int = 50_000
 
     def __post_init__(self):
         for m in self.methods:
