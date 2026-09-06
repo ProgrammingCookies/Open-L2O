@@ -3,11 +3,7 @@ Adapter for the model-based L2O family: LISTA, ALISTA LFISTA, LAMP, StepLista, L
 
 Unlike model-free methods, ``Model_Base_L2O/train.py`` is a layer-wise has layer wise training, not a end-to-end trained
 like model-free methods.
-This is resolved here by treating each unrolled layer as analogous to one iteration just like done in primer and benchmark paper.
-The per-layer ``LassoObjective`` sequence (``lasso_layer0, lasso_layer1, ..., lasso_layer{K-1}``)
-from a test file becomes this adapter's "trajectory", directly comparable in
-*shape* (not in what one "step" costs) to a model-free method's per-iteration
-loss trajectory.
+This is resolved here by treating each unrolled layer as one iteration.
 
   train.py --data_dir <dir> --base_dir <dir> --task=lasso --model_name=<name>
            --exp_name <name> --replicate <n> --num_layers N
@@ -18,7 +14,7 @@ loss trajectory.
               <model_dir>/all_test_metrics.json + <model_dir>/<file>_final_output.npy
               (the model's recovered sparse signal)
 
-The Experiment-2 metrics (core/lasso_metrics.py: suboptimality gap,
+The following metrics (core/lasso_metrics.py: suboptimality gap,
 modified relative loss, NMSE vs x_true, LASSO-optimal recovery error) are also
 recomputed per test file from that final_output.npy plus the split file's own
 b, x_true rows, and folded into EvalOutput.metrics/per_seed.
@@ -45,6 +41,12 @@ from core.shell import REPO_ROOT, run_script
 _LIB_DIR = "Model_Base_L2O"
 
 # supported model's names (must match Model_Base_L2O/train.py's --model_name choices)
+#
+# Only "lista" and "alista" (the two Experiment 2 actually uses) start their
+# layer 0 from the seeded x0 that data_preprocessing.py gives every
+# model's input for task="lasso",
+# the others still use start from x0=0 internally.
+# Not fixed as of yet cause they're not used in my experiments.
 SUPPORTED_MODELS = (
     "lista", "lfista", "lamp", "step_lista", "lista_cp", "lista_cpss",
     "alista", "glista", "tista",
@@ -64,7 +66,7 @@ class ModelBasedMethod(L2OMethod):
     # (train() and evaluate() must have the same values on these or we're not evaluating on the same optimizer we trained)
     def _exp_name(self, config: Dict[str, Any]) -> str:
         # "problem" is only actually needed to build a name here, so it's only
-        # required when run_name is absent -- if run_name is given, "problem"
+        # required when run_name is absent, if run_name is given, "problem"
         # is never read, not even to fall back to something.
         run_name = config.get("run_name")
         if run_name:
@@ -106,7 +108,7 @@ class ModelBasedMethod(L2OMethod):
 
     def _warn_ignored(self, path: str, value: Any, reason: str) -> None:
         """A config value the caller explicitly set is about to be silently
-        discarded si this function warns about it.
+        discarded, this function warns about it.
         """
         warnings.warn(
             "{} is ignoring {}={!r} -- {}".format(self.name, path, value, reason),
@@ -130,14 +132,14 @@ class ModelBasedMethod(L2OMethod):
             flags["num_val_images"] = val_n
         if config.get("seed") is not None:
             flags["seed"] = config["seed"]
-        # User decided flags overrides presets. But data_dir/base_dir are always set to the correct values for fields that need to be concistent across train/evaluate.
-        # Warns when conflicts happen.
+        # User decided flags overrides presets except data_dir/base_dir are always set to the right values 
+        # for variables that need to be consistent across train/evaluate.
         train_section = config.get("train", {})
         if "base_dir" in train_section:
             self._warn_ignored(
                 "config['train']['base_dir']", train_section["base_dir"],
                 "base_dir is always derived from output_dir (here: {!r}), not "
-                "configurable through config['train'] -- pass a different "
+                "configurable through config['train'], pass a different "
                 "output_dir instead.".format(base_dir))
         if "data_dir" in train_section and train_section["data_dir"] != data_dir:
             self._warn_ignored(
