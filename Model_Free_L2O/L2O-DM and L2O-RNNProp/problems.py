@@ -170,10 +170,17 @@ def lasso_fixed(data_A, data_b, stddev=0.01, l=0.005, dtype=tf.float32):
 
 
 def lasso_from_dataset(data_dir, split="train_data.npy", batch_size=128, l=0.005,
-                       stddev=0.01, dtype=tf.float32):
+                       dtype=tf.float32, deterministic=False):
     """Lasso problem sampled from a pre-generated dataset´.
     Loads a single shared dictionary A.npy (m, n) and a split file
     whose shape is [b (m,); x_true (n,)].
+
+    deterministic=False (default, used for training): every call draws a
+    fresh random batch, with replacement, from the whole split -- standard
+    stochastic-minibatch behaviour.
+
+    deterministic=True (used for evaluation): calls walk the split
+    exactly once, in order, batch_size rows at a time.
     """
     a = np.load(os.path.join(data_dir, "A.npy")).astype(np.float32)
     data = np.load(os.path.join(data_dir, split)).astype(np.float32)
@@ -184,8 +191,15 @@ def lasso_from_dataset(data_dir, split="train_data.npy", batch_size=128, l=0.005
                 os.path.join(data_dir, split), data.shape[1], m + n, m, n, data_dir))
     num_samples = data.shape[0]
     a_const = tf.constant(a, dtype=dtype)
+    cursor = {"pos": 0}
 
     def build():
+        if deterministic:
+            start = cursor["pos"]
+            end = min(start + batch_size, num_samples)
+            idx = np.arange(start, end)
+            cursor["pos"] = end % num_samples
+        else:
         idx = np.random.randint(0, num_samples, size=batch_size)
         batch = data[idx]
         build.last_x_true = batch[:, m:]
@@ -206,6 +220,7 @@ def lasso_from_dataset(data_dir, split="train_data.npy", batch_size=128, l=0.005
 
     build.last_x_true = None
     build.last_b = None
+    build.num_samples = num_samples
     return build
 
 

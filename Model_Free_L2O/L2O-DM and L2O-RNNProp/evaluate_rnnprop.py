@@ -15,6 +15,7 @@
 """Learning 2 Learn evaluation — RNNprop variant."""
 
 import argparse
+import logging
 import os
 import pickle
 from timeit import default_timer as timer
@@ -53,18 +54,36 @@ def main():
     if FLAGS.seed is not None:
         tf.random.set_seed(FLAGS.seed)
 
+    is_lasso_dataset = FLAGS.problem == "lasso_dataset"
+    if is_lasso_dataset and FLAGS.num_epochs != 1:
+        logging.warning(
+            "--num_epochs is ignored for --problem=lasso_dataset: evaluation "
+            "always makes one deterministic pass over every row of --lasso_split "
+            "instead (batch_size=%d rows at a time), so every test instance is "
+            "scored exactly once regardless of --num_epochs.", FLAGS.lasso_batch_size)
+
     problem, net_config, net_assignments = util.get_config(
-        FLAGS.problem, None, net_name="RNNprop", lasso_data_dir=FLAGS.lasso_data_dir,
+        FLAGS.problem, None, mode="test", net_name="RNNprop", lasso_data_dir=FLAGS.lasso_data_dir,
         lasso_split=FLAGS.lasso_split, lasso_batch_size=FLAGS.lasso_batch_size,
         lasso_lam=FLAGS.lasso_lam)
+
+    if is_lasso_dataset:
+        num_batches = -(-problem.num_samples // FLAGS.lasso_batch_size) 
+    else:
+        num_batches = FLAGS.num_epochs
 
     total_time = 0.0
     total_cost = 0.0
     loss_record = []
-    # Final recovered signal (last epoch only)
+
+    sum_costs = None
+    x_pred_chunks = []
+    x_true_chunks = []
+    b_chunks = []
+
     final_x_value = None
 
-    for e in range(FLAGS.num_epochs):
+    for e in range(num_batches):
         start = timer()
         x_vars, const_vars, loss_fn = problem()
 
@@ -77,8 +96,6 @@ def main():
                 grads = tape.gradient(loss, x_vars)
                 adam.apply_gradients(zip(grads, x_vars))
                 costs.append(float(loss))
-            loss_record.extend(costs)
-            total_cost += sum(costs) / FLAGS.num_steps
             final_x_value = x_vars[0].numpy()
 
         elif FLAGS.optimizer == "L2L":
@@ -113,16 +130,27 @@ def main():
                 fx, x, state, mt, vt, t = optimizer.step(loss_fn, x, state, mt, vt, t)
                 costs.append(float(fx))
 
-            loss_record.extend(costs)
-            total_cost += sum(costs) / FLAGS.num_steps
             final_x_value = x[0].numpy()
         else:
             raise ValueError("{} is not a valid optimizer".format(FLAGS.optimizer))
 
         total_time += timer() - start
+        total_cost += sum(costs) / FLAGS.num_steps
 
-    util.print_stats("Epoch {}".format(FLAGS.num_epochs), total_cost,
-                     total_time, FLAGS.num_epochs)
+        if is_lasso_dataset:
+            costs_arr = np.array(costs, dtype=np.float64)
+            sum_costs = costs_arr if sum_costs is None else sum_costs + costs_arr
+            x_pred_chunks.append(final_x_value)
+            x_true_chunks.append(problem.last_x_true)
+            b_chunks.append(problem.last_b)
+        else:
+            loss_record.extend(costs)
+
+    if is_lasso_dataset:
+        loss_record = (sum_costs / num_batches).tolist()
+
+    util.print_stats("Epoch {}".format(num_batches), total_cost,
+                     total_time, num_batches)
 
     if FLAGS.output_path is not None:
         os.makedirs(FLAGS.output_path, exist_ok=True)
@@ -134,14 +162,24 @@ def main():
             pickle.dump(loss_record, f)
         print("Saving evaluate loss record {}".format(output_file))
 
-        x_true = getattr(problem, "last_x_true", None)
-        b_value = getattr(problem, "last_b", None)
-        if final_x_value is not None and x_true is not None and b_value is not None:
+        if is_lasso_dataset:
             recovery_file = os.path.join(
                 FLAGS.output_path,
                 "{}_recovery-{}.npz".format(FLAGS.optimizer, FLAGS.problem))
-            np.savez(recovery_file, x_pred=final_x_value, x_true=x_true, b=b_value)
+            np.savez(recovery_file,
+                     x_pred=np.concatenate(x_pred_chunks, axis=0),
+                     x_true=np.concatenate(x_true_chunks, axis=0),
+                     b=np.concatenate(b_chunks, axis=0))
             print("Saving recovered signal + ground truth {}".format(recovery_file))
+        else:
+            x_true = getattr(problem, "last_x_true", None)
+            b_value = getattr(problem, "last_b", None)
+            if final_x_value is not None and x_true is not None and b_value is not None:
+                recovery_file = os.path.join(
+                    FLAGS.output_path,
+                    "{}_recovery-{}.npz".format(FLAGS.optimizer, FLAGS.problem))
+                np.savez(recovery_file, x_pred=final_x_value, x_true=x_true, b=b_value)
+                print("Saving recovered signal + ground truth {}".format(recovery_file))
 
 
 if __name__ == "__main__":
