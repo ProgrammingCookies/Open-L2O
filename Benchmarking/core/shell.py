@@ -29,6 +29,49 @@ _ARGPARSE_FLAG_RE = re.compile(r"""add_argument\(\s*["']--([A-Za-z0-9_]+)["']"""
 _ABSL_FLAG_RE = re.compile(r"""flags\.DEFINE_\w+\(\s*["']([A-Za-z0-9_]+)["']""")
 
 
+def _strip_comments(text: str) -> str:
+    """
+    Removes comments so we don't accidentally whitelist 
+    commented-out flags as if they were live code.
+    """
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("'''", i) or text.startswith('"""', i):
+            quote = text[i:i + 3]
+            end = text.find(quote, i + 3)
+            if end == -1:
+                break  # Unterminated triple-quote: drop the rest of the file.
+            i = end + 3
+            continue
+        if c == "#":
+            nl = text.find("\n", i)
+            if nl == -1:
+                break
+            i = nl
+            continue
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+            i += 1
+            while i < n:
+                ch = text[i]
+                out.append(ch)
+                if ch == "\\" and i + 1 < n:
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                if ch == quote:
+                    break
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 @functools.lru_cache(maxsize=None)
 def discover_script_flags(script_path: str) -> FrozenSet[str]:
     """Scans the script at `script_path`' as a plain text. searching for flags that match the regex.
@@ -41,6 +84,7 @@ def discover_script_flags(script_path: str) -> FrozenSet[str]:
         text = Path(script_path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return frozenset()
+    text = _strip_comments(text)
     found = set(_ARGPARSE_FLAG_RE.findall(text))
     found.update(_ABSL_FLAG_RE.findall(text))
     return frozenset(found)
