@@ -1,0 +1,14 @@
+.git
+.vs
+.vscode
+.claude
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+data/
+Benchmarking/results/
+Benchmarking/data/**/*.npz
+**/checkpoints/
+**/*.ckpt
+**/logs/
+Model_Free_L2O/L2O-DM and L2O-RNNProp/MNIST-data/
