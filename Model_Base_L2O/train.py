@@ -352,13 +352,13 @@ def run(
     earlystopping_cb = tf.keras.callbacks.EarlyStopping(
         monitor=monitor,
         min_delta=0,
-        patience=5,
+        patience=FLAGS.patience,
         mode='min',
         restore_best_weights=False)
     cbs = [earlystopping_cb]
 
     logging.info('Fitting Lista Keras model.')
-    model.fit(
+    history0 = model.fit(
         train_dataset,
         epochs=epochs,
         steps_per_epoch=training_steps_per_epoch,

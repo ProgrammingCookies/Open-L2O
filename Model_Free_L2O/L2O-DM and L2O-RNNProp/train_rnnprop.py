@@ -49,6 +49,11 @@ def parse_args():
                         "construction for reproducible training.")
     p.add_argument("--learning_rate", type=float, default=0.001)
     p.add_argument("--second_derivatives", action="store_true")
+    p.add_argument("--last_step_loss", action="store_true",
+                   help="Train against the FINAL unroll step's loss only "
+                        "(w_T=1, w_t=0 otherwise), matching Lv, Jiang & Li "
+                        "2017's own stated RNNprop objective, instead of this script's prior default of "
+                        "summing the loss over every step.")
     p.add_argument("--beta1", type=float, default=0.95)
     p.add_argument("--beta2", type=float, default=0.95)
     p.add_argument("--problem", default="mnist")
@@ -167,7 +172,8 @@ def main():
                  x_final, state, mt, vt, _) = optimizer.unroll(
                     loss_fn, x_vars, state, mt, vt, step_offset,
                     FLAGS.unroll_length, scale=scale,
-                    second_derivatives=FLAGS.second_derivatives)
+                    second_derivatives=FLAGS.second_derivatives,
+                    last_step_loss=FLAGS.last_step_loss)
                 grad_norm = float(tf.linalg.global_norm(meta_grads))
                 meta_opt.apply_gradients(zip(meta_grads, net_vars))
                 for var, val in zip(x_vars, x_final):
@@ -227,7 +233,7 @@ def main():
                     (loss_val, _, _, ev_x_final, ev_state,
                      ev_mt, ev_vt, _) = optimizer.unroll(
                         ev_loss_fn, ev_x, ev_state, ev_mt, ev_vt, ev_step,
-                        FLAGS.unroll_length)
+                        FLAGS.unroll_length, last_step_loss=FLAGS.last_step_loss)
                     for var, val in zip(ev_x, ev_x_final):
                         var.assign(val)
                     ev_step += FLAGS.unroll_length

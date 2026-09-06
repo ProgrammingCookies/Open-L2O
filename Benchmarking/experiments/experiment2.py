@@ -13,13 +13,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -53,6 +56,9 @@ def _test_filename(p: float) -> str:
 
 @dataclass
 class OrchestratorConfig:
+    """Every value below is a deliberate decision, not a script default left
+    untouched.
+    """
     results_dir: str
     seeds: List[int]
     methods: List[str] = field(default_factory=lambda: list(ALL_METHODS))
@@ -73,11 +79,36 @@ class OrchestratorConfig:
     model_free_num_steps: int = 1_000
     model_free_unroll_length: int = 20
     model_free_batch_size: int = 128
-    model_free_eval_num_steps: int = 200
-    # Placeholder values TODO: Decide
-    model_free_lr: float = 5e-4
+    model_free_eval_num_steps: int = 1000
+    model_free_lr: float = 1e-3
+    # Periodic best-checkpoint-selection cadence during meta-training.
+    model_free_evaluation_period: int = 5
+    model_free_evaluation_epochs: int = 20
+    # RNNProp-only: decay rates for its internal Adam-style input
+    # normalization.
+    model_free_rnnprop_beta1: float = 0.95
+    model_free_rnnprop_beta2: float = 0.95
+    # RNNProp-only: train against the final unroll step's loss only (w_T=1,
+    # w_t=0 otherwise).
+    model_free_rnnprop_last_step_loss: bool = False
+    # Curriculum learning (--if_cl) and imitation learning (--if_mt), Chen et
+    # al. 2020 "Training Stronger Baselines for Learning to Optimize.
+    model_free_curriculum: bool = False
+    model_free_imitation: bool = False
+    # Writes a per-epoch (loss, meta-gradient-norm) trajectory to
+    # <output_dir>/profile.jsonl (train_dm.py/train_rnnprop.py's own
+    # profiling.RunProfiler, already used by experiment1.py -- off by
+    # default here since Experiment 2 doesn't otherwise need it).
+    model_free_profile: bool = False
+
+    # Model-based (LISTA/ALISTA)
     model_based_num_layers: int = 16
+    model_based_base_lr: float = 5e-4
+    model_based_train_batch_size: int = 128
     model_based_epochs: int = 200
+    # ALISTA support-selection schedule (models/alista.py)
+    model_based_ss_q_per_layer: float = 1.2
+    model_based_ss_maxq: float = 13.0
 
     # Reference x* solve for the recovery metrics (core/lasso_metrics.py).
     num_fista_iters: int = 50_000
@@ -93,21 +124,39 @@ class OrchestratorConfig:
 def _build_train_config(method_name: str, cfg: OrchestratorConfig, width_dir: str,
                         seed: int, run_name: str, output_dir: str) -> Dict[str, Any]:
     if method_kind(method_name) == "model_free":
+        train_flags: Dict[str, Any] = {
+            "lasso_data_dir": width_dir,
+            "lasso_lam": cfg.lam,
+            "lasso_batch_size": cfg.model_free_batch_size,
+            "num_epochs": cfg.model_free_num_epochs,
+            "num_steps": cfg.model_free_num_steps,
+            "unroll_length": cfg.model_free_unroll_length,
+            "learning_rate": cfg.model_free_lr,
+            "evaluation_period": cfg.model_free_evaluation_period,
+            "evaluation_epochs": cfg.model_free_evaluation_epochs,
+        }
+        if method_name == "l2o-rnnprop":
+            # train_dm.py has no --beta1/--beta2 flags at all (argparse would
+            # error on an unrecognized one), so this must stay conditional --
+            # unlike model-based's ss_q_per_layer/ss_maxq (absl flags, always
+            # defined, harmless no-op for the model that doesn't use them).
+            train_flags["beta1"] = cfg.model_free_rnnprop_beta1
+            train_flags["beta2"] = cfg.model_free_rnnprop_beta2
+            if cfg.model_free_rnnprop_last_step_loss:
+                train_flags["last_step_loss"] = True
+        if cfg.model_free_curriculum:
+            train_flags["if_cl"] = True
+        if cfg.model_free_imitation:
+            train_flags["if_mt"] = True
+        if cfg.model_free_profile:
+            train_flags["profile_path"] = os.path.join(output_dir, "profile.jsonl")
         return {
             "method": method_name,
             "problem": "lasso_dataset",
             "seed": seed,
             "run_name": run_name,
             "output_dir": output_dir,
-            "train": {
-                "lasso_data_dir": width_dir,
-                "lasso_lam": cfg.lam,
-                "lasso_batch_size": cfg.model_free_batch_size,
-                "num_epochs": cfg.model_free_num_epochs,
-                "num_steps": cfg.model_free_num_steps,
-                "unroll_length": cfg.model_free_unroll_length,
-                "learning_rate": cfg.model_free_lr,
-            },
+            "train": train_flags,
         }
     return {
         "method": method_name,
@@ -120,6 +169,11 @@ def _build_train_config(method_name: str, cfg: OrchestratorConfig, width_dir: st
             "num_layers": cfg.model_based_num_layers,
             "lasso_lam": cfg.lam,
             "epochs": cfg.model_based_epochs,
+            "base_lr": cfg.model_based_base_lr,
+            "train_batch_size": cfg.model_based_train_batch_size,
+            "model_lam": cfg.lam,
+            "ss_q_per_layer": cfg.model_based_ss_q_per_layer,
+            "ss_maxq": cfg.model_based_ss_maxq,
         },
     }
 
@@ -140,10 +194,10 @@ def run_one(method_name: str, config: OrchestratorConfig, width_dir: str, seed: 
     method = get_method(method_name)
     run_name = "{}__{}__s{}".format(method_name, width, seed)
     output_dir = os.path.join(results_root, "s{}".format(seed), width, method_name)
-    config = _build_train_config(method_name, config, width_dir, seed, run_name, output_dir)
+    train_config = _build_train_config(method_name, config, width_dir, seed, run_name, output_dir)
 
     t0 = time.time()
-    train_out = method.train(config, output_dir)
+    train_out = method.train(train_config, output_dir)
     train_sec = time.time() - t0
 
     # x* (calculated with FISTA like done in primer and benchmark too) depends only on (A, b, lam,
@@ -153,7 +207,7 @@ def run_one(method_name: str, config: OrchestratorConfig, width_dir: str, seed: 
     rows: List[Dict[str, Any]] = []
     if method_kind(method_name) == "model_free":
         for p in config.test_sparsities:
-            eval_config = dict(config)
+            eval_config = dict(train_config)
             eval_config["eval"] = {
                 "optimizer": "L2L",
                 "lasso_data_dir": width_dir,
@@ -166,13 +220,18 @@ def run_one(method_name: str, config: OrchestratorConfig, width_dir: str, seed: 
                 "num_fista_iters": config.num_fista_iters,
                 "xstar_cache_dir": xstar_cache_dir,
             }
+            if method_name == "l2o-rnnprop":
+                # Must match train()'s beta1/beta2, a mismatch here would apply the checkpoint
+                # through a differently-configured normalization scheme.
+                eval_config["eval"]["beta1"] = config.model_free_rnnprop_beta1
+                eval_config["eval"]["beta2"] = config.model_free_rnnprop_beta2
             eval_output_dir = os.path.join(output_dir, "eval_p{:.2f}".format(p))
             t1 = time.time()
             eval_out = method.evaluate(eval_config, train_out.checkpoint, eval_output_dir)
             eval_sec = time.time() - t1
             rows.append(_make_row(method_name, width, seed, p, eval_out.metrics, train_sec, eval_sec))
     else:
-        eval_config = dict(config)
+        eval_config = dict(train_config)
         eval_config["eval"] = {
             "data_dir": width_dir,
             "test_files": [_test_filename(p) for p in config.test_sparsities],
@@ -201,9 +260,40 @@ def _load_completed(results_path: str) -> set:
     return completed
 
 
+def _git_commit() -> Optional[str]:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(__file__),
+            stderr=subprocess.DEVNULL, text=True).strip()
+    except Exception:
+        return None
+
+
+def _write_config_snapshot(cfg: OrchestratorConfig) -> None:
+    """Write config.json once per results_dir, so a summary.json produced
+    today is still traceable to the exact OrchestratorConfig/commit that
+    produced it after lasso_metrics.py or the config defaults change later.
+    Left untouched on a resumed run -- same append-only-results, don't-clobber
+    resumability as results.jsonl -- rather than overwritten with whatever
+    flags happen to be passed on a later resume.
+    """
+    path = os.path.join(cfg.results_dir, "config.json")
+    if os.path.exists(path):
+        return
+    snapshot = {
+        "config": dataclasses.asdict(cfg),
+        "git_commit": _git_commit(),
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(path, "w") as f:
+        json.dump(snapshot, f, indent=2)
+    print("Wrote config snapshot to {}".format(path))
+
+
 def run_sweep(cfg: OrchestratorConfig) -> None:
     cfg.results_dir = os.path.abspath(cfg.results_dir)
     os.makedirs(cfg.results_dir, exist_ok=True)
+    _write_config_snapshot(cfg)
     results_path = os.path.join(cfg.results_dir, "results.jsonl")
     errors_path = os.path.join(cfg.results_dir, "errors.jsonl")
     completed = _load_completed(results_path)
@@ -319,6 +409,21 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--model_based_num_layers", type=int, default=None)
     p.add_argument("--model_based_epochs", type=int, default=None)
     p.add_argument("--num_fista_iters", type=int, default=None)
+    p.add_argument("--model_free_curriculum", action="store_true",
+                   help="Enable train_dm.py/train_rnnprop.py's --if_cl "
+                        "(curriculum learning on unroll length).")
+    p.add_argument("--model_free_imitation", action="store_true",
+                   help="Enable train_dm.py/train_rnnprop.py's --if_mt "
+                        "(imitation learning from analytical optimizers).")
+    p.add_argument("--model_free_profile", action="store_true",
+                   help="Write a per-epoch (loss, meta-grad-norm) trajectory "
+                        "to <output_dir>/profile.jsonl.")
+    p.add_argument("--model_free_rnnprop_last_step_loss", action="store_true",
+                   help="RNNProp only: train against the final unroll step's "
+                        "loss only (w_T=1, w_t=0 otherwise), matching Lv, "
+                        "Jiang & Li 2017's own stated training objective, "
+                        "instead of this script's prior default of summing "
+                        "the loss over every step (DM's convention).")
     return p.parse_args()
 
 
@@ -334,6 +439,14 @@ def main() -> None:
             value = getattr(args, field_name)
             if value is not None:
                 setattr(cfg, field_name, value)
+        if args.model_free_curriculum:
+            cfg.model_free_curriculum = True
+        if args.model_free_imitation:
+            cfg.model_free_imitation = True
+        if args.model_free_profile:
+            cfg.model_free_profile = True
+        if args.model_free_rnnprop_last_step_loss:
+            cfg.model_free_rnnprop_last_step_loss = True
     run_sweep(cfg)
 
 

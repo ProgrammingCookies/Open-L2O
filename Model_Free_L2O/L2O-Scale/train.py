@@ -17,7 +17,9 @@
 
 import argparse
 import os
+import random
 
+import numpy as np
 import tensorflow as tf
 
 import metaopt
@@ -149,6 +151,19 @@ def parse_args():
     p.add_argument("--seed", type=int, default=None,
                    help="Seeds numpy/TF RNGs before problem/optimizer construction for "
                         "reproducible training.")
+    p.add_argument("--profile_path", default=None,
+                   help="If set, write a per-meta-iteration JSONL trajectory here "
+                        "plus a '<stem>_summary.json' aggregate (loss, meta-gradient "
+                        "norm before/after clipping, peak GPU memory, timing) for "
+                        "Experiment 1's Table 2 metrics.")
+    p.add_argument("--include_lasso_problems", action="store_true")
+    p.add_argument("--lasso_data_dir", default=None,
+                   help="Directory holding A.npy + split .npy files from "
+                        "Benchmarking/data/lasso.py. Required with "
+                        "--include_lasso_problems.")
+    p.add_argument("--lasso_split", default="train_data.npy")
+    p.add_argument("--lasso_batch_size", type=int, default=128)
+    p.add_argument("--lasso_lam", type=float, default=0.005)
     return p.parse_args()
 
 
@@ -219,6 +234,12 @@ def main():
         problems_and_data.extend(ps.outward_snake_problems())
     if FLAGS.include_dependency_chain_problems:
         problems_and_data.extend(ps.dependency_chain_problems())
+    if FLAGS.include_lasso_problems:
+        if FLAGS.lasso_data_dir is None:
+            raise ValueError("--include_lasso_problems requires --lasso_data_dir")
+        problems_and_data.extend(ps.lasso_problems(
+            FLAGS.lasso_data_dir, split=FLAGS.lasso_split,
+            batch_size=FLAGS.lasso_batch_size, lam=FLAGS.lasso_lam))
 
     if not problems_and_data:
         raise ValueError("No problems selected -- pass at least one --include_*_problems flag.")
@@ -295,7 +316,8 @@ def main():
         fix_num_steps_eval=FLAGS.fix_num_steps_eval,
         evaluation_period=FLAGS.evaluation_period,
         evaluation_epochs=FLAGS.evaluation_epochs,
-        save_period=FLAGS.save_period)
+        save_period=FLAGS.save_period,
+        profile_path=FLAGS.profile_path)
 
 
 if __name__ == "__main__":
