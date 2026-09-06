@@ -1,0 +1,18 @@
+{
+  "run_name": "swarm_quadratic",
+  "method": "l2o-swarm",
+  "problem": "quadratic",
+  "output_dir": "results",
+  "train": {
+    "num_epochs": 100,
+    "evaluation_period": 50,
+    "evaluation_epochs": 5,
+    "num_steps": 100,
+    "unroll_length": 20
+  },
+  "eval": {
+    "optimizer": "L2L",
+    "num_epochs": 5,
+    "num_steps": 100
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "run_name": "scale_hrnn_mnist_mlp",
+  "method": "l2o-scale",
+  "problem": "mnist_mlp",
+  "output_dir": "results",
+  "train": {
+    "optimizer": "HierarchicalRNN",
+    "cell_cls": "GRUCell",
+    "cell_size": 20,
+    "num_cells": 2,
+    "num_meta_iterations": 5
+  },
+  "eval": {
+    "test_optimizer": "L2o",
+    "num_testing_itrs": 100
+  }
+}
