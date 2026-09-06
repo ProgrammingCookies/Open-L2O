@@ -30,6 +30,10 @@ def self_loss (x, fx_array, n):
 	x, x1 = tf.split(x, [n, 0], 0)
 	fx_array,f1 = tf.split(fx_array, [n,0], 0)
 	problem_dim = x.shape.as_list()[-1]
+	# NOTE Problem: with train.py --problem simple, x has no batch dim here (shape
+	# is 1-D), so x.shape.as_list()[1] raises IndexError: list index out of range.
+	# --problem quadratic (used by Benchmarking/configs/swarm_quadratic.json) works
+	# fine. Not investigated yet -- pre-existing
 	batch_size = x.shape.as_list()[1]
 	x = tf.transpose(x, [1,0,2])
 	fx_array = tf.transpose(fx_array, [1,0])

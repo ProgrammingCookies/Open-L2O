@@ -86,7 +86,7 @@ def main():
         raise ValueError("{} is not a valid optimizer".format(FLAGS.optimizer))
 
     if FLAGS.path is not None:
-        with open("./{}/evaluate_record.pickle".format(FLAGS.path), "wb") as l_record:
+        with open(os.path.join(FLAGS.path, "evaluate_record.pickle"), "wb") as l_record:
             record = {
                 "all_time_loss_record": all_time_loss_record,
                 "min_loss_record": min_loss_record,

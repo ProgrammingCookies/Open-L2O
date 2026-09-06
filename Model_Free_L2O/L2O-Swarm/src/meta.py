@@ -116,7 +116,7 @@ class MetaOptimizer:
                 self.fc_va.append(tf.Variable(
                     tf.ones([1, fc_columns]), trainable=False, name="fc_va"))
         else:
-            with open("./{}/loss_record.pickle".format(model_path), "rb") as f:
+            with open(os.path.join(model_path, "loss_record.pickle"), "rb") as f:
                 data = pickle.load(f)
             self.fc_kernel = [tf.Variable(item) for item in data["fc_weights"]]
             self.fc_bias = [tf.Variable(item) for item in data["fc_bias"]]
