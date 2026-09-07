@@ -518,6 +518,15 @@ class TrainableOptimizer:
     def save(self, path=None):
         """Saves the optimizer's own trainable weights to disk."""
         variables = list(self.trainable_variables)
+        if not variables:
+            raise RuntimeError(
+                "refusing to save an empty checkpoint: the optimizer has no "
+                "trainable variables. Under Keras 3 variables are created on the "
+                "first forward pass, so this means the optimizer was never applied "
+                "-- e.g. a training budget too small to run a single unroll leaves "
+                "it unbuilt. The count check below cannot catch this, since 0 keys "
+                "for 0 variables compares equal; without this guard an empty pickle "
+                "is written and only fails much later, at load time.")
         result = {_weight_key(i, v): v.numpy() for i, v in enumerate(variables)}
         if len(result) != len(variables):
             raise RuntimeError(

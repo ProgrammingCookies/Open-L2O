@@ -109,6 +109,15 @@ def _assign_saved_weights(variables, saved, source):
 def save(network, filename=None):
     """Save the variables contained by a network to disk."""
     variables = list(network.trainable_variables)
+    if not variables:
+        raise RuntimeError(
+            "refusing to save an empty checkpoint: the network has no trainable "
+            "variables. Under Keras 3 variables are created on the first forward "
+            "pass, so this means the network was never called -- e.g. num_steps < "
+            "unroll_length runs zero unrolls, leaving the net unbuilt. The count "
+            "check below cannot catch this, since 0 keys for 0 variables compares "
+            "equal; without this guard an empty pickle is written and only fails "
+            "much later, at load time.")
     to_save = {_weight_key(i, v): v.numpy() for i, v in enumerate(variables)}
     if len(to_save) != len(variables):
         raise RuntimeError(
