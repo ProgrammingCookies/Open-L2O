@@ -106,13 +106,14 @@ def main():
                 for k, net in optimizer._nets.items():
                     filename = os.path.join(FLAGS.path, "{}.l2l-0".format(k))
                     if os.path.exists(filename):
-                        # Trigger a dummy forward pass to build the network
-                        state_init = optimizer.initial_state(x_vars)
-                        # Build network by running one step
-                        with tf.GradientTape() as tape:
-                            tape.watch([tf.identity(v) for v in x_vars])
-                            loss = loss_fn([tf.identity(v) for v in x_vars])
                         from networks import load as net_load
+                        init_state = optimizer.initial_state(x_vars)
+                        x_tmp = [tf.identity(v) for v in x_vars]
+                        with tf.GradientTape() as tape:
+                            tape.watch(x_tmp)
+                            fx_tmp = loss_fn(x_tmp)
+                        grads_tmp = tape.gradient(fx_tmp, x_tmp)
+                        optimizer._apply_step(grads_tmp, x_tmp, init_state)
                         net_load(net, filename)
 
             state = optimizer.initial_state(x_vars)
