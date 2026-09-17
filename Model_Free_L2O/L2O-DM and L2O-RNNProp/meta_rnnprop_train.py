@@ -160,11 +160,14 @@ class MetaOptimizer:
     # ------------------------------------------------------------------
 
     def unroll(self, loss_fn, x_vars, state, mt, vt, step_offset,
-               len_unroll, scale=None, second_derivatives=False):
+               len_unroll, scale=None, second_derivatives=False,
+               last_step_loss=False):
         """Run one unroll window.
 
         Args:
             step_offset: global step at the start of this window (for bias correction).
+            last_step_loss: if True, the meta-training loss is the FINAL
+                step's loss only (w_T=1, w_t=0 otherwise).
         Returns:
             (total_loss, meta_grads, net_vars, x_final, state_final,
              mt_final, vt_final, fx_final)
@@ -192,7 +195,7 @@ class MetaOptimizer:
                           if scale is not None else x)
             fx_final = loss_fn(x_unscaled)
             fx_list.append(fx_final)
-            total_loss = tf.add_n(fx_list)
+            total_loss = fx_final if last_step_loss else tf.add_n(fx_list)
 
         net_vars = self.trainable_variables
         meta_grads = meta_tape.gradient(total_loss, net_vars)

@@ -1,0 +1,117 @@
+% Experiment 2 hyperparameter table, generated from a full audit of
+% Benchmarking/experiments/experiment2.py's OrchestratorConfig plus every
+% flag exposed by the five underlying scripts it drives
+% (train_dm.py, train_rnnprop.py, evaluate_dm.py, evaluate_rnnprop.py,
+% Model_Base_L2O/train.py). Every value below is either sourced from the
+% pre-study specification, sourced from a cited paper, directly measured
+% against this codebase, or an explicitly-flagged judgment call / open gap --
+% see Benchmarking/README.md's "Experiment 2 hyperparameter decisions"
+% section for the full reasoning behind each row.
+%
+% Requires: \usepackage{longtable} \usepackage{booktabs} \usepackage{amsmath}
+% Include with: \input{experiment2_hyperparameters}
+
+\begin{longtable}{@{} l l p{7.6cm} @{}}
+\caption{Experiment 2 hyperparameters: values and justification for every parameter governing the L2O-DM, L2O-RNNProp, LISTA, and ALISTA comparison on the LASSO recovery task.}
+\label{tab:exp2-hyperparameters} \\
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Source / justification} \\
+\midrule
+\endfirsthead
+
+\multicolumn{3}{l}{\textit{(continued from previous page)}} \\
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Source / justification} \\
+\midrule
+\endhead
+
+\midrule
+\multicolumn{3}{r}{\textit{(continued on next page)}} \\
+\endfoot
+
+\bottomrule
+\endlastfoot
+
+\multicolumn{3}{@{}l}{\textbf{Problem and dataset generation}} \\
+\midrule
+Measurements $m$ & 210 & Pre-study specification (Table 3). \\
+Signal dimension $n$ & 300 & Pre-study specification (Table 3). \\
+Regularization $\lambda$ & 0.005 & Pre-study specification (Table 3); fixed for the whole experiment. \\
+Training set size & 32{,}000 & Pre-study specification (Table 3). \\
+Validation set size & 1{,}024 & Pre-study specification (Table 3). \\
+Test set size (per sparsity) & 1{,}280 & Pre-study specification (Table 3). \\
+Measurement noise (SNR) & 40\,dB & Pre-study specification (Table 3). \\
+Training sparsity -- narrow & $p = 0.10$ (fixed) & Pre-study specification (Table 3). \\
+Training sparsity -- medium & $p \sim \mathcal{U}(0.075, 0.20)$ & Pre-study specification (Table 3). \\
+Training sparsity -- wide & $p \sim \mathcal{U}(0.05, 0.30)$ & Pre-study specification (Table 3). \\
+Test sparsities & $\{0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.35, 0.40\}$ & Pre-study specification (Table 3). \\
+Random seeds & 10 (0--9) & Pre-study specification (Table 3), \S7.3 reproducibility protocol. \\
+Dictionary $A$ distribution & $\mathcal{N}(0, 1/m)$ entries, unit-$\ell_2$-normalized columns & Standard LASSO/L2O benchmark convention (Primer \& Benchmark \S4.1.2). \\
+Nonzero-coefficient distribution & $\mathcal{N}(0, 1)$ & Standard convention, matches the pre-study's sparse-signal model. \\
+Shared starting point $x_0$ stddev & 0.01 & Judgment call: one seeded $x_0 \sim \mathcal{N}(0, 0.01^2)$ per instance, fed into \emph{every} method's first step/layer so all four start from an identical point for a given seed. Matches the value the codebase's other (non-LASSO) problem definitions already used for optimizee initialization. Verified by construction: DM's first recorded evaluation cost matches an independently computed $f(x_0)$ exactly; LISTA/ALISTA's layer-0 output matches an independent derivation of one ISTA step from $x_0$ to floating-point precision. \\
+
+\addlinespace
+\multicolumn{3}{@{}l}{\textbf{Model-based (LISTA / ALISTA) -- architecture}} \\
+\midrule
+Number of layers $T$ & 16 & Primer \& Benchmark \S4.1.1/\S4.1.2 ("vanilla LISTA and ALISTA, both unrolled to 16 layers"); matches the ALISTA reference implementation's own default. \\
+Weight tying (LISTA) & Untied (\texttt{share\_W=False}) & "Vanilla LISTA" (the Primer \& Benchmark's own term for this configuration) uses untied per-layer weights; already the codebase's default. \\
+Threshold/weight init strength (\texttt{model\_lam}) & 0.005 ($=\lambda$) & Derived: layer-0 threshold $\theta_0 = \texttt{model\_lam}/(1.001\lVert A\rVert_2^2)$ and weight $W_0 = A^\top/(1.001\lVert A\rVert_2^2)$. Setting \texttt{model\_lam}$=\lambda$ makes the untrained network exactly one step of ISTA on the true objective per layer. Corroborated by the codebase's \texttt{step\_lista} variant, which hard-asserts \texttt{model\_lam == lasso\_lam}. \\
+ALISTA step-size init & 1.0 & Codebase default; confirmed architecturally correct (a unit initial step size), not altered. \\
+ALISTA support-selection rate (\texttt{ss\_q\_per\_layer}) & 1.2 & Code default, carried forward explicitly. \emph{Not independently verified} against the ALISTA/LISTA-CPSS papers' own stated schedule -- flagged as an open gap, not a confirmed decision. \\
+ALISTA support-selection cap (\texttt{ss\_maxq}) & 13.0 & Code default, carried forward explicitly. \emph{Not independently verified} -- same caveat as above. \\
+
+\addlinespace
+\multicolumn{3}{@{}l}{\textbf{Model-based (LISTA / ALISTA) -- training}} \\
+\midrule
+Base learning rate & $5\times10^{-4}$ & Primer \& Benchmark \S4.1.1, stated verbatim. \\
+Training batch size & 128 & Primer \& Benchmark \S4.1.1 (the ALISTA reference repository's own default is 64; the Primer overrides it to 128, which also matches the model-free batch size). \\
+Training schedule & Progressive, 3 stages per layer (new-layer-only, then two joint fine-tuning stages at $0.2\times$ and $0.02\times$ the base rate) & Already how the codebase's training loop works; confirmed correct, not a fixed step count. \\
+Per-variable gradient decay & $0.3^{\,(\text{layers since introduced})}$ & Codebase's own mechanism for down-weighting older layers' gradients during joint fine-tuning; unchanged mechanical port. \\
+Early-stopping patience & 8 epochs (of 250 steps each) & Was 5 (the code's original default). Checked directly against real training trajectories: the shortest stage (11 epochs) was flat from its very first epoch, and the longest (108 epochs) showed a smooth asymptotic curve correctly followed to its true plateau -- no evidence 5 was causing premature stops. Raised to 8 anyway as a low-cost safety margin (real model-based training is cheap regardless of patience). \\
+Early-stopping \texttt{min\_delta} & 0 (any improvement resets patience) & Codebase default, unchanged. \\
+Per-stage epoch cap (safety only) & 200 & Verified via a real-scale pilot (4-layer LISTA/2-layer ALISTA, Docker+GPU): every stage triggered early stopping well before the cap (longest stage used 108/200 epochs); this cap should not bind in practice. \\
+
+\addlinespace
+\multicolumn{3}{@{}l}{\textbf{Model-free (L2O-DM / L2O-RNNProp) -- training}} \\
+\midrule
+Truncated-BPTT unroll length & 20 & Stated in both the original DM and RNNProp papers. \\
+Optimizee steps per epoch & 1{,}000 & Primer \& Benchmark \S4.1.2, the exact LASSO experiment being replicated: "trained\ldots for 100 epochs and 1,000 iterations per epoch." Supersedes the 100-step figure from the original DM/RNNProp papers' own (non-LASSO) experiments. \\
+Meta-training epochs & 100 & Primer \& Benchmark \S4.1.2, quoted above. Identical for both methods by design (their native conventions differ by up to 100$\times$, which would be an unfair asymmetry in a benchmark explicitly comparing them). Cost measured directly: $\approx$83\,s/epoch at real problem scale on an RTX~2070 $\Rightarrow$ $\approx$2.3\,h per training run. \\
+LASSO instances per meta-step & 128 & \emph{Not paper-sourced} -- LASSO is not one of either paper's own benchmarked problems. Judgment call: kept equal to the model-based batch size to avoid an arbitrary cross-family asymmetry on a parameter neither paper constrains. \\
+Meta-optimizer learning rate & $1\times10^{-3}$ & Neither paper states a value (the DM paper: "chosen by random search"); matches both scripts' own implementation default. \\
+Validation cadence (\texttt{evaluation\_period}) & 5 epochs & Judgment call, rescaled from the "identical for both methods" principle. The scripts' native defaults (100 / 10 epochs) are calibrated for much larger native epoch counts; at the corrected 100-epoch budget either would validate the checkpoint once or never, defeating best-checkpoint selection entirely. \\
+Validation sample size (\texttt{evaluation\_epochs}) & 20 fresh instances per check & Already identical between both scripts' own defaults; made explicit. \\
+RNNProp input-normalization decay (\texttt{beta1}, \texttt{beta2}) & 0.95, 0.95 & Code default, carried forward explicitly (kept identical between training and evaluation to avoid a checkpoint being applied through a mismatched normalization scheme). \emph{Not independently verified} against the original RNNProp paper's stated value -- flagged as an open gap. \\
+
+\addlinespace
+\multicolumn{3}{@{}l}{\textbf{Evaluation protocol (all methods)}} \\
+\midrule
+Model-free test-time horizon & 1{,}000 iterations & Primer \& Benchmark \S4.1.2, stated verbatim. \emph{Not} directly comparable to model-based's 16 layers (the Primer notes the same gap); reported as a separate matched-budget-at-16 comparison alongside the full trajectories. \\
+Model-based test-time horizon & 16 layers ($=T$) & Same as the trained architecture; one layer treated as one "iteration" for the shared trajectory axis (one $A$-multiply plus one $A^\top$-multiply per step, the standard unit in this literature). \\
+Test-set coverage & Full deterministic pass, every instance scored exactly once & Corrects a discrepancy where model-free evaluation defaulted to a single $\sim$128-instance bootstrap draw per condition while LISTA/ALISTA already scored the full 1{,}280-instance file; Primer \& Benchmark's own protocol (Eq.~21) specifies expectations over the entire test set. \\
+
+\addlinespace
+\multicolumn{3}{@{}l}{\textbf{Reference solution (all methods' recovery metrics)}} \\
+\midrule
+Solver & FISTA with gradient-scheme adaptive restart & Plain FISTA at the Primer's conventional 2{,}000 iterations was measurably under-converged at this problem's denser test sparsities (certified relative duality gap up to $\sim$7 orders of magnitude worse at $p=0.40$ than at $p=0.02$, measured directly against this codebase's solver). Restart recovers FISTA's fast local convergence rate. \\
+Stopping criterion & Certified duality-gap $< 10^{-10}$ (relative) & Provable per-instance accuracy bound (LASSO dual certificate), rather than a fixed iteration count that is merely adequate by convention. \\
+Gap-check frequency & Every 25 iterations & Implementation choice; cheap relative to the main solver loop. \\
+Safety iteration cap & 50{,}000 & Should not bind in practice; retained only as an upper bound in case gap-based convergence is unexpectedly slow. \\
+
+\end{longtable}
+
+% Parameters deliberately left at their code default because they are not
+% applicable to this experiment's design (not omissions -- each was checked):
+% if_cl=False, if_mt=False, if_scale=False, second_derivatives=False
+%   (no curriculum learning, multi-task training, or random-scaling
+%   augmentation is used, matching the pre-study's specification);
+% optimizers/mt_ratio/mt_ratios/k, min_num_eval, num_mt, fix_num_unrolls,
+%   rd_scale_bound (all only meaningful under multi-task or curriculum
+%   training, both disabled above);
+% alista_W_file="W.npy" (matches the filename the dataset generator writes,
+%   by naming convention);
+% val_batch_size=1024 (equals the validation set size, so validation covers
+%   the full validation set in a single batch each epoch);
+% test_batch_size / num_test_images (dead flags in the underlying training
+%   script -- confirmed unused by the actual test-time code path, which
+%   reads val_batch_size instead).

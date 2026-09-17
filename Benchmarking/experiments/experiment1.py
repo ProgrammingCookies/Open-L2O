@@ -102,19 +102,24 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 # Make the Benchmarking platform's packages importable without modifying it
 # (same trick run.py / experiment2.py use), regardless of the caller's cwd.
 _BENCHMARKING_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_BENCHMARKING_ROOT, ".."))
 if _BENCHMARKING_ROOT not in sys.path:
     sys.path.insert(0, _BENCHMARKING_ROOT)
 
@@ -414,6 +419,225 @@ def _load_completed(results_path: str) -> set:
     return completed
 
 
+def _run_git(args: List[str]) -> Optional[str]:
+    """`git <args>` at the repo root, or None if it fails for any reason.
+
+    Everything provenance-related is best-effort by construction: this is a
+    multi-day unattended sweep, and a missing/broken git must never be able to
+    kill it. stderr is discarded because git chatters about CRLF conversion on
+    this Windows checkout; `encoding=` rather than `text=` so a non-UTF-8 byte
+    in a diff can't raise instead of just being replaced.
+
+    The two `-c` overrides matter for the Docker runs, where Linux git reads a
+    checkout made by Windows git:
+      * core.autocrlf -- it is set in this machine's *system* gitconfig, which
+        a container never sees, so without pinning it here Linux git treats the
+        CRLF working tree as differing from every LF blob. Measured on this
+        repo: 1820 "modified" paths and a multi-MB junk diff, versus 97 with it
+        set. No-op on a checkout that is already LF.
+      * safe.directory -- a bind-mounted repo is owned by a different uid than
+        the container user, which makes git refuse every repo operation.
+    """
+    try:
+        return subprocess.check_output(
+            ["git", "-c", "safe.directory=*", "-c", "core.autocrlf=true"] + args,
+            cwd=_REPO_ROOT, stderr=subprocess.DEVNULL,
+            encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _head_from_git_dir() -> Dict[str, Any]:
+    """Commit/branch read straight out of .git/, for when the `git` binary is
+    unavailable -- which is the normal case for the real runs: the open-l2o
+    Docker image does not install git, while the repo (including .git/) is
+    bind-mounted in. Without this, provenance in the environment that actually
+    produces the results would silently be all-None.
+
+    Dirty-tree state genuinely needs git, so it stays unknown here.
+    """
+    git_dir = os.path.join(_REPO_ROOT, ".git")
+    try:
+        with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as f:
+            head = f.read().strip()
+    except OSError:
+        return {"commit": None, "branch": None}
+    if not head.startswith("ref:"):
+        return {"commit": head, "branch": None}  # detached HEAD
+    ref = head.split(":", 1)[1].strip()
+    # Strip only the refs/heads/ prefix, not every path segment -- a branch
+    # named "feature/x" must not be reported as "x" (git rev-parse
+    # --abbrev-ref, which the non-degraded path uses, keeps the slash).
+    branch = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+    try:  # loose ref
+        with open(os.path.join(git_dir, *ref.split("/")), encoding="utf-8") as f:
+            return {"commit": f.read().strip(), "branch": branch}
+    except OSError:
+        pass
+    try:  # packed-refs (a ref that's been gc'd into the pack file)
+        with open(os.path.join(git_dir, "packed-refs"), encoding="utf-8") as f:
+            for line in f:
+                if line.startswith(("#", "^")):
+                    continue
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return {"commit": parts[0], "branch": branch}
+    except OSError:
+        pass
+    return {"commit": None, "branch": branch}
+
+
+def _git_state(results_dir: str) -> Dict[str, Any]:
+    """Commit *and* working-tree state as of this moment.
+
+    A commit hash alone does not identify the code that ran in this repo: much
+    of what the sweep executes is uncommitted (core/, the library training
+    scripts) or entirely untracked. That is exactly why runs/exp2_real's and
+    runs/exp2_try2's config.json had to be reconstructed by hand afterwards --
+    experiment2.py recorded only `git rev-parse HEAD`. So this also records:
+
+      * `git status --porcelain` -- the full list of dirty/untracked paths;
+      * `git diff HEAD` -- written to a sidecar .diff file, since a 20-40 KB
+        diff does not belong inline in a JSON record. Covers modified TRACKED
+        files only;
+      * sha256 of every untracked *.py -- the gap the diff cannot cover, and
+        the specific thing that made exp2_try2 unreproducible (its orchestrator
+        was itself untracked).
+    """
+    state: Dict[str, Any] = {"git_binary_available": _run_git(["--version"]) is not None}
+
+    def _degrade(why: str) -> Dict[str, Any]:
+        state.update(_head_from_git_dir())
+        state["dirty"] = None
+        state["degraded_note"] = (
+            why + " Commit/branch were read directly from .git/ instead, and no "
+            "working-tree state could be captured. dirty=null means UNKNOWN, "
+            "not clean -- do not read the absence of a diff here as evidence "
+            "the tree was clean.")
+        return state
+
+    if not state["git_binary_available"]:
+        return _degrade("No `git` binary in this environment.")
+
+    commit = _run_git(["rev-parse", "HEAD"])
+    if commit is None:
+        # git exists but can't operate on this repo at all (unreadable .git, a
+        # refused bind mount, ...). Degrading here rather than trusting the
+        # `git_binary_available: true` branch is what keeps this from silently
+        # recording an all-null state with no explanation attached.
+        return _degrade("`git` is installed but could not read this repository.")
+    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    state["commit"] = commit.strip()
+    state["branch"] = branch.strip() if branch else None
+
+    # -uall: without it git collapses a new untracked directory to a single
+    # "?? dir/" entry, so .py files inside it would never be fingerprinted
+    # below. Safe to enumerate fully because Benchmarking/.gitignore already
+    # excludes runs/ (else this would list every checkpoint).
+    porcelain = _run_git(["status", "--porcelain", "-uall"])
+    if porcelain is None:
+        state["dirty"] = None
+        return state
+    entries = [ln for ln in porcelain.splitlines() if ln.strip()]
+    state["dirty"] = bool(entries)
+    state["status_porcelain"] = entries
+
+    diff = _run_git(["diff", "HEAD"])
+    if diff:
+        raw = diff.encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        # Named by content hash so repeated invocations over a stopped/restarted
+        # sweep share one file when the tree hasn't moved, instead of piling up
+        # identical copies; a resume that *has* drifted gets its own file.
+        name = "working_tree_{}.diff".format(digest[:12])
+        path = os.path.join(results_dir, name)
+        if not os.path.exists(path):
+            # Binary write: on Windows text mode would translate \n -> \r\n, so
+            # the recorded sha256 would not match the bytes actually on disk.
+            with open(path, "wb") as f:
+                f.write(raw)
+        state["diff_file"] = name
+        state["diff_sha256"] = digest
+        state["diff_bytes"] = len(raw)
+    state["diff_note"] = ("`git diff HEAD` excludes untracked files; those are the "
+                          "'??' entries in status_porcelain, hashed in untracked_py_sha256.")
+
+    untracked: Dict[str, str] = {}
+    for entry in entries:
+        if not entry.startswith("??"):
+            continue
+        rel = entry[3:].strip().strip('"')
+        if not rel.endswith(".py"):
+            continue
+        try:
+            with open(os.path.join(_REPO_ROOT, rel), "rb") as f:
+                untracked[rel] = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            continue
+    if untracked:
+        state["untracked_py_sha256"] = untracked
+    return state
+
+
+def _serializable_config(cfg: Experiment1Config) -> Dict[str, Any]:
+    """dataclasses.asdict() is not enough on its own here: train_size_by_dim and
+    batch_size_by_dim are keyed by (m, n) tuples, which json.dump rejects."""
+    d = dataclasses.asdict(cfg)
+    for key in ("train_size_by_dim", "batch_size_by_dim"):
+        d[key] = {_dim_key(k): v for k, v in d[key].items()}
+    return d
+
+
+def _write_config_snapshot(cfg: Experiment1Config, git_state: Dict[str, Any],
+                           rows_already_done: int) -> None:
+    """Write config.json once per results_dir, so a summary.json produced today
+    is still traceable to the exact Experiment1Config/code state that produced
+    it after the defaults or lasso_metrics.py change later. Mirrors
+    experiment2.py's snapshot; left untouched on a resumed run, same
+    append-only, don't-clobber resumability as results.jsonl.
+    """
+    path = os.path.join(cfg.results_dir, "config.json")
+    if os.path.exists(path):
+        return
+    snapshot = {
+        "config": _serializable_config(cfg),
+        "git": git_state,
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        # A results_dir that already holds rows predates this snapshot (the
+        # mechanism was added 2026-09-07, after exp1_calibration had been
+        # running for days). Recorded so those rows are never misattributed to
+        # the code state captured above -- the same trap the exp2 backfill notes
+        # had to be written by hand to close.
+        "rows_already_done_when_written": rows_already_done,
+    }
+    with open(path, "w") as f:
+        json.dump(snapshot, f, indent=2)
+    print("Wrote config snapshot to {}".format(path))
+
+
+def _append_provenance_record(cfg: Experiment1Config, git_state: Dict[str, Any],
+                              rows_already_done: int) -> None:
+    """Append one record per run_sweep() invocation to provenance.jsonl.
+
+    config.json above is deliberately write-once, which is right for the config
+    but wrong for code state: this sweep is resumable and gets stopped and
+    restarted over days (to free the GPU for other jobs), and a restart is
+    precisely when the working tree has drifted. Since results.jsonl is
+    append-only, recording how many rows already existed when each invocation
+    started is what lets a row be mapped back to the code state that produced
+    it.
+    """
+    path = os.path.join(cfg.results_dir, "provenance.jsonl")
+    record = {
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "rows_already_done": rows_already_done,
+        "argv": sys.argv,
+        "git": git_state,
+    }
+    with open(path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def run_sweep(cfg: Experiment1Config) -> None:
     # Adapters run library scripts with cwd=<that library's own dir>, so a relative
     # results_dir would resolve against the wrong directory once training starts
@@ -423,6 +647,14 @@ def run_sweep(cfg: Experiment1Config) -> None:
     results_path = os.path.join(cfg.results_dir, "results.jsonl")
     errors_path = os.path.join(cfg.results_dir, "errors.jsonl")
     completed = _load_completed(results_path)
+
+    git_state = _git_state(cfg.results_dir)
+    _write_config_snapshot(cfg, git_state, len(completed))
+    _append_provenance_record(cfg, git_state, len(completed))
+    if not git_state.get("git_binary_available"):
+        print("[provenance] WARNING: no `git` binary here -- recorded the commit from "
+              ".git/ but NOT the working-tree state. Install git in the image "
+              "(Dockerfile) to capture it.")
 
     data_root = os.path.join(cfg.results_dir, "data")
     checkpoints_root = os.path.join(cfg.results_dir, "checkpoints")

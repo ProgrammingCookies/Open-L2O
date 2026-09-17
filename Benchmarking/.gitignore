@@ -1,0 +1,4 @@
+# Benchmark run outputs (checkpoints, logs, trajectories, result.json)
+results/
+runs/
+__pycache__/
