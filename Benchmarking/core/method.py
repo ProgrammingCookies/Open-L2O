@@ -43,6 +43,7 @@ class L2OMethod(abc.ABC):
                  output_dir: str) -> EvalOutput:
         """
         Evaluates on the config's problem.
+        As every method has its own evaluation harness, this just forces them to provide evaluate as it otherwise defaults to notimplementederror.
         return normalized eval metrics.
         """
         raise NotImplementedError

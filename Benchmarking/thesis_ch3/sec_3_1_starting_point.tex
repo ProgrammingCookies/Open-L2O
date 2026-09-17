@@ -1,0 +1,36 @@
+\section{Starting point}
+\label{sec:platform-start}
+
+The only publicly available L2O benchmark is the code release that accompanies
+the Primer of Chen et al.~\cite{chen2021primer}, Open-L2O. It is not a
+platform in the sense of one program that trains and evaluates many methods;
+it is a collection of the original authors' research codebases placed side by
+side: six TensorFlow libraries, namely five model-free ones (L2O-DM together
+with L2O-RNNProp, L2O-Scale, L2O-Entropy, L2O-Jacobian, L2O-Swarm) and one
+model-based one (the LISTA family), plus a PyTorch library (L2O-Minimax) not
+used in this thesis. Each has its own \texttt{train.py} and \texttt{evaluate.py}, its own
+command-line conventions (two of the three families use \texttt{argparse}, the
+third uses \texttt{absl.flags}), its own result files, and its own notion of
+what a ``problem'' or a ``seed'' is. Several of the libraries also ship
+top-level modules with the same names (\texttt{meta.py}, \texttt{util.py},
+\texttt{problems.py}, \texttt{networks.py}), so two of them cannot even be
+imported into the same Python process. Comparing two methods therefore meant
+running two unrelated pipelines by hand and reconciling their outputs
+afterwards, with nothing guaranteeing that both had seen the same problem
+instances, the same starting points or the same evaluation protocol. As noted
+in the pre-study (Section~\ref{sec:existing-benchmarks}), no alternative has
+been published since.
+
+The pre-study set four goals for extending this code into a platform
+(Section~\ref{sec:planned-extensions}): (i) a unified pipeline through which
+every method is trained and evaluated the same way; (ii) built-in
+reproducibility and fairness; (iii) code that is atomised and reusable enough
+for a newcomer to add a method or an experiment; and (iv) the data generator
+and metric functions the experiments of this thesis require. This chapter
+describes what was built for each. The framing matters: the platform
+\emph{extends} Open-L2O rather than replacing it. The method implementations
+that produce every number in Chapter~\ref{ch:exp2} are the Primer's own, run
+unchanged inside a harness; what is new is everything around them.
+Table~\ref{tab:platform-origin} separates the two.
+
+\input{thesis_ch3/table_inherited_added}

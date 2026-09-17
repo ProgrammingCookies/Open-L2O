@@ -1,0 +1,91 @@
+\section{Experiment support: data and metrics}
+\label{sec:platform-data}
+
+Goal (iv) of the pre-study was the data generator and the metric functions
+that Experiment~2 needs. Both are part of the platform rather than of the
+experiment script, so that any method registered in the harness can be
+trained on the same data and scored by the same functions. This section
+describes the mechanisms; the values chosen for Experiment~2 (problem size,
+$\lambda$, the three widths, dataset sizes) are given with their rationale in
+Chapter~\ref{ch:exp2}.
+
+\subsection{LASSO dataset generator}
+
+\texttt{Benchmarking/data/lasso.py} generates, for one seed, a family of
+datasets that share a single dictionary $A \in \mathbb{R}^{m \times n}$ with
+i.i.d.\ $\mathcal{N}(0, 1/m)$ entries and unit-norm columns. Sparse signals
+have exactly $\mathrm{round}(p\,n)$ nonzero coordinates on a uniformly random
+support with $\mathcal{N}(0,1)$ values (a Bernoulli-support variant matching
+the Primer's own convention is also provided), and measurements
+$b = A x_\mathrm{true} + \varepsilon$ with $\varepsilon$ scaled to a requested
+SNR, or omitted for the noiseless case. The sparsity level $p$ is the quantity
+whose distribution the experiment controls: a training set is generated from a
+\emph{sparsity specification} that is either a fixed $p$ or an interval from
+which $p$ is drawn uniformly \emph{per instance}, and the generator writes one
+training and validation set per specification (the ``narrow'', ``medium'' and
+``wide'' widths of Experiment~2) plus a battery of test sets at fixed $p$
+values. Because $A$ and the test battery are shared across widths, training
+width is the only thing that differs between the runs that are later
+compared.
+
+Two further files are written per split. The seeded starting point
+\texttt{*\_x0.npy} of Section~\ref{sec:platform-repro} is generated here, once,
+so that it is a property of the data rather than of any method. For ALISTA,
+whose weights are analytic rather than learned, the generator computes the
+matrix $W$ from $A$ by solving the coherence-minimisation problem of Liu et
+al.~\cite{liu2019alista} exactly, one linear program per column
+($w_i = \arg\min_w \max_{j \neq i} |w^\top a_j|$ subject to $w^\top a_i = 1$),
+and stores it next to $A$.
+
+\subsection{Metric functions and the reference solution}
+
+\texttt{core/lasso\_metrics.py} implements the four metrics of the
+pre-study (Section~\ref{sec:prestudy-exp2}) for a batch of instances and a
+batch of predicted solutions $x$:
+the suboptimality gap $g_q(x) = f_q(x) - f_q^\ast$
+(Eq.~\ref{eq:subopt-gap}); the modified relative loss
+$R_{f} = \mathbb{E}_q[f_q(x) - f_q^\ast] / \mathbb{E}_q[f_q^\ast]$
+(Eq.~\ref{eq:rel-loss}), a ratio of expectations over the test set as in the
+Primer; the NMSE against $x_\mathrm{true}$ in dB (Eq.~\ref{eq:nmse}); and the
+LASSO-optimal recovery error, the same NMSE evaluated at the LASSO minimiser
+$x^\ast$ itself, which measures how well the objective at this $\lambda$ can
+recover the signal at all and thereby separates a hard test sparsity from a
+weak method. The three per-instance quantities are returned as a mean and a
+standard deviation over the test set; $R_f$, being a ratio of two means, is a
+single number.
+
+Three of the four depend on the exact minimiser $x^\ast$ and its objective
+value $f^\ast$, so the quality of the reference solver bounds the precision
+of every metric. The solver is a batched FISTA in double precision with
+per-instance adaptive restart~\cite{odonoghue2015restart} and a
+\emph{certified} stopping rule: every 25 iterations it evaluates the LASSO
+duality gap from the current iterate's dual point, which upper-bounds
+$f(x) - f^\ast$ for any $x$, and stops when the worst instance in the batch
+is within a relative gap of $10^{-10}$, up to an iteration cap. A predicted
+$x$ that beats the certified $x^\ast$ by more than numerical tolerance is
+therefore impossible, and the function warns if it happens, which catches an
+$x$ scored under the wrong $\lambda$. Because $x^\ast$ depends only on
+$(A, b, \lambda)$ and the tolerances, it is computed once and cached under a
+key that is the SHA-256 hash of the actual $A$ and $b$ bytes, not of a
+filename, so that a cache entry can never be reused for a different batch by
+mistake. All methods, widths and seeds that evaluate the same test file share
+the same $x^\ast$.
+
+\subsection{Classical baselines and per-iteration curves}
+
+Two analysis-time tools complete the experiment support. First,
+\texttt{classical\_baselines.py} runs textbook ISTA and FISTA (fixed step
+$1/L$, no restart, from the shared $x_0$) on exactly the test instances and
+seeds of a sweep and scores them with the same metric functions and the same
+cached $x^\ast$, so that a learned optimizer's row can be placed next to a
+classical row produced under identical conditions. It records the metrics at
+chosen iteration counts (16, 100 and 1000 in Chapter~\ref{ch:exp2}) and the
+full mean objective trajectory. Second, the model-free evaluation scripts
+save the batch-mean objective at every step, and
+\texttt{plot\_compute\_matched\_rf.py} turns that record into
+$R_f$ as a function of the iteration $k$, with the unrolled networks' values
+at their fixed depth as reference lines. Together these give the
+matched-budget view used in Chapter~\ref{ch:exp2}, in which iteration $k$
+means $k$ learned steps, $k$ solver iterations or $k$ unrolled layers, all
+from the same $x_0$; the caveat that equal iteration counts are not equal
+compute is stated there.

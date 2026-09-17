@@ -1,0 +1,19 @@
+{
+  "run_name": "rnnprop_simple_smoke",
+  "method": "l2o-rnnprop",
+  "problem": "simple",
+  "output_dir": "results",
+  "train": {
+    "num_epochs": 5,
+    "num_steps": 50,
+    "unroll_length": 20,
+    "beta1": 0.95,
+    "beta2": 0.95
+  },
+  "eval": {
+    "optimizer": "L2L",
+    "num_steps": 100,
+    "beta1": 0.95,
+    "beta2": 0.95
+  }
+}

@@ -1,0 +1,93 @@
+\section{The harness}
+\label{sec:platform-harness}
+
+The platform lives in \texttt{Benchmarking/}. Its core is small: seven
+modules of roughly 700 lines in \texttt{core/}, of which the LASSO metrics
+module is a third; one adapter file per method family in
+\texttt{adapters/}; and a command-line entry point. Everything else
+(the sweep driver, the data generator, the experiment scripts) is a consumer
+of this core. Figure~\ref{fig:platform-architecture} shows how the pieces fit.
+
+\input{thesis_ch3/fig_architecture}
+
+\subsection{One contract for every method}
+
+A method is anything that implements the abstract class \texttt{L2OMethod}
+(\texttt{core/method.py}), which has exactly two operations:
+\begin{itemize}
+  \item \texttt{train(config, output\_dir) $\to$ TrainOutput}: train the
+    optimizer described by \texttt{config} and return a checkpoint handle;
+  \item \texttt{evaluate(config, checkpoint, output\_dir) $\to$ EvalOutput}:
+    run that checkpoint on the config's problem and return normalised
+    metrics.
+\end{itemize}
+Two kinds of method satisfy this contract. Learned optimizers
+(\texttt{trainable = True}) do real work in both calls. Classical optimizers
+(Adam, SGD, Adagrad; \texttt{trainable = False}) inherit a no-op
+\texttt{train} and implement \texttt{evaluate} by running the classical
+update rule through a \emph{host} library's evaluation harness on the same
+problem, so that a baseline number is produced by the same code path and
+scored the same way as the learned optimizer it is compared with. Methods are
+registered by name (\texttt{core/registry.py}); at the time of writing eleven
+are registered, eight learned (\texttt{l2o-dm}, \texttt{l2o-rnnprop},
+\texttt{l2o-scale}, \texttt{l2o-entropy}, \texttt{l2o-jacobian},
+\texttt{l2o-swarm}, \texttt{lista}, \texttt{alista}) and three classical.
+
+The return types are plain data containers (\texttt{core/result.py}). The
+one that makes methods comparable is the \emph{trajectory}: a list of scalar
+objective values, one per optimization step, from a representative
+evaluation. \texttt{summarize\_trajectory} reduces any trajectory to
+\texttt{final\_loss}, \texttt{min\_loss}, \texttt{mean\_loss} and
+\texttt{num\_points}, and those four numbers appear in every result and in
+the leaderboard regardless of which library produced them. The runner
+(\texttt{core/runner.py}) drives one benchmark: it resolves the method,
+threads the seed (Section~\ref{sec:platform-repro}), calls \texttt{train}
+unless asked to evaluate an existing checkpoint, calls \texttt{evaluate},
+and writes a \texttt{BenchmarkResult} with the training metrics, evaluation
+metrics, trajectory, artifact paths and provenance to \texttt{result.json}.
+
+\subsection{Thin adapters that run the libraries as subprocesses}
+
+The adapter is the translation layer between this contract and one library's
+actual scripts. Each adapter builds the library's command-line flags from the
+config, runs the library's own \texttt{train.py} or \texttt{evaluate.py}
+\emph{as a subprocess in that library's directory}
+(\texttt{core/shell.py}), and reads back whatever files the script writes.
+Running subprocesses rather than importing the libraries is forced by the
+module-name collisions described in Section~\ref{sec:platform-start}, but it
+has a second consequence that matters more for a benchmark: the harness never
+reaches into a library. The number a method produces inside the platform is
+the number its own script produces. The only changes made to the libraries
+themselves are the fairness mechanisms of Section~\ref{sec:platform-repro}
+(a seed flag, a deterministic evaluation pass, a shared starting point), each
+made so that the library's own script yields a number comparable with the
+others'.
+
+The adapters differ mainly in what ``one step'' of the trajectory means. For
+the model-free optimizers it is one optimizer step on the optimizee. For
+LISTA and ALISTA, whose training is a layer-wise Keras \texttt{fit()} rather
+than a meta-training loop, the adapter (\texttt{adapters/model\_based.py})
+maps each unrolled layer to one trajectory point, so a 16-layer network yields
+a 16-point trajectory. The mapping is what lets both families be scored by
+the same code, but it must not be read as cost equivalence: one model-free
+step runs a recurrent network per coordinate, one unrolled layer is a matrix
+product and a threshold. Chapter~\ref{ch:exp2} keeps the two on separate
+axes for that reason.
+
+\subsection{Explicit configuration}
+
+A run is described by one JSON config naming the method, the problem, an
+optional seed, and two free-form dictionaries \texttt{train} and
+\texttt{eval} whose keys are forwarded to the library's scripts as flags.
+Two rules make this safe. First, an adapter never falls back to a hidden
+default for a field that changes what is trained or evaluated, or how a
+checkpoint is located and scored; such keys are looked up with
+\texttt{core.config.require}, which raises an error naming the missing key.
+The reason is that \texttt{train} and \texttt{evaluate} are separate calls,
+and two calls that each default the same field only agree by coincidence.
+Second, before a subprocess is launched, \texttt{core/shell.py} scans the
+target script's own flag definitions (\texttt{add\_argument} or
+\texttt{DEFINE\_*} calls) and rejects any flag the script does not define,
+suggesting the closest real one. A mistyped hyperparameter therefore fails
+immediately with a message instead of being silently ignored by an
+\texttt{argparse} parser several layers down.

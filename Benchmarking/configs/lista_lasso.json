@@ -1,0 +1,16 @@
+{
+  "_note": "Needs a generated LASSO dataset first (run from Benchmarking/): python data/lasso.py --out_dir data/lasso_example --seeds 0 --m 25 --n 50 -- data_dir below must point at the resulting seed0 directory.",
+  "run_name": "lista_lasso_smoke",
+  "method": "lista",
+  "output_dir": "results",
+  "train": {
+    "data_dir": "data/lasso_example/seed0",
+    "num_layers": 4,
+    "lasso_lam": 0.005
+  },
+  "eval": {
+    "data_dir": "data/lasso_example/seed0",
+    "test_files": ["test_sparsity_0.10.npy"],
+    "num_fista_iters": 5000
+  }
+}

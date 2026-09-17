@@ -1,0 +1,39 @@
+% Appendix A -- the TensorFlow 2 / Keras 3 migration, per library.
+% Requires: booktabs, array. Keep this an appendix; chapter 3 refers to it in one paragraph.
+\chapter{Migration of the Open-L2O libraries}
+\label{app:migration}
+
+The Open-L2O code release~\cite{chen2021primer} consists of six independent
+libraries written for TensorFlow~1 (graph mode, \texttt{tf.contrib},
+per-library dependency pins). Before the platform of Chapter~\ref{ch:platform}
+could exist, each library was ported to TensorFlow~2 with Keras~3 and eager
+execution so that all of them run in one environment. The port was
+deliberately mechanical: every training and evaluation script keeps its
+original name, existing flags and output files, the model architectures and
+meta-training loops are unchanged, and optional research features that no
+published command exercises (model-transfer distillation, curriculum
+learning, hardware-specific measurement paths) were left out rather than
+re-invented. Each library was verified after the port by running its own
+documented training and evaluation commands end to end.
+Table~\ref{tab:migrated-libraries} lists the libraries and what changed
+structurally in each. The PyTorch library in the release (L2O-Minimax) was not
+part of the migration and is not used in this thesis.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Libraries ported to TensorFlow~2 / Keras~3. \emph{Family} is the optimizer type; \emph{structural change} lists what differs from the original tree beyond the framework port itself.}
+\label{tab:migrated-libraries}
+\begin{tabular}{@{} l p{0.18\linewidth} p{0.36\linewidth} p{0.22\linewidth} @{}}
+\toprule
+Library & Family & Structural change & Verified by \\
+\midrule
+L2O-DM, L2O-RNNProp & coordinatewise LSTM optimizer~\cite{andrychowicz2016,lv2017} & none & \texttt{train\_dm.py}, \texttt{train\_rnnprop.py} $\to$ \texttt{evaluate\_*.py} round trip \\
+L2O-Scale & hierarchical RNN optimizer~\cite{wichrowska2017} & separate training and evaluation trees merged into one; the TF1 \texttt{while\_loop} unroll replaced by an eager unroll with the same truncation semantics & \texttt{train.py} $\to$ \texttt{evaluate.py} round trip for all five optimizer classes, incl.\ the sparse-gradient path \\
+L2O-Entropy & L2O-Scale with Hessian/Jacobian flatness regularization~\cite{yang2023} & rebuilt as a diff on the unified L2O-Scale tree; Hessian-vector products via nested gradient tapes & regularizer estimates checked against a quadratic problem's exact Hessian; regression check that all unregularized optimizers train identically to L2O-Scale \\
+L2O-Jacobian (HALO) & L2O-Scale with sparse per-tensor updates~\cite{halo2020} & rebuilt on the L2O-Entropy tree; layer-wise sparse-update mode ported (the two element-wise modes are not used by any published command); paths needing external hardware or unavailable datasets excluded & documented pretrain $\to$ train $\to$ evaluate pipeline; regression check against L2O-Entropy with sparsity off \\
+L2O-Swarm & population-based optimizer with attention~\cite{cao2019swarm} & meta-optimizer reorganised into explicit setup / reset / unroll-step / meta-step calls that mirror the original graph-mode contract & \texttt{train.py} $\to$ \texttt{evaluate.py} round trip on the quadratic problem, learned and Adam baseline \\
+Model\_Base\_L2O (LISTA family) & unrolled ISTA networks~\cite{gregor2010,liu2019alista} & none; import paths normalised & LASSO training run with checkpoint save and test-mode evaluation \\
+\bottomrule
+\end{tabular}
+\end{table}

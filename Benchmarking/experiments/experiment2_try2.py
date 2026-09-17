@@ -19,10 +19,20 @@ can check whether results trend differently before committing to the full
 matrix again. Seeds default to 21-30 (not 0-9) -- a fresh, non-overlapping
 range from the original exp2_real sweep's seeds.
 
+The re-centered width scheme this file introduced (narrow p=0.175 fixed, medium
+[0.1125, 0.2375], wide [0.05, 0.30] -- all three sharing centre 0.175, unlike
+experiment2.py's, whose centres sit 0.075 apart and so confound width with
+centre) is worth running at the pre-study's own Table-3 dimensions too. Pass
+--m 210 --n 300 for that; see --n's help text for why n=50 is a poor host for a
+width experiment. That combination -- real dims, noiseless, centred widths --
+is the deconfounded version of Experiment 2.
+
 Usage:
     python experiment2_try2.py --results_dir runs/exp2_try2 --seeds 21 --smoke
     python experiment2_try2.py --results_dir runs/exp2_try2 --seeds 21
     python experiment2_try2.py --results_dir runs/exp2_try2 --seeds 21 22 23 24 25 26 27 28 29 30
+    python experiment2_try2.py --results_dir runs/exp2_try3_210x300 --m 210 --n 300 \
+        --methods l2o-dm l2o-rnnprop lista alista --seeds 41 42 43 44 45 46 47 48 49 50
 """
 
 from __future__ import annotations
@@ -49,7 +59,7 @@ import adapters
 from core.registry import get_method
 from data.lasso import DEFAULT_TEST_SPARSITIES, Experiment2Config, generate_experiment2_dataset
 
-MODEL_FREE_METHODS = ("l2o-dm", "l2o-rnnprop")
+MODEL_FREE_METHODS = ("l2o-dm", "l2o-rnnprop", "l2o-scale")
 MODEL_BASED_METHODS = ("lista", "alista")
 ALL_METHODS = MODEL_FREE_METHODS + MODEL_BASED_METHODS
 WIDTHS = ("narrow", "medium", "wide")
@@ -166,6 +176,47 @@ class OrchestratorConfig:
     # profiling.RunProfiler, already used by experiment1.py).
     model_free_profile: bool = False
 
+    # L2O-Scale (Wichrowska et al. 2017) -- the third model-free arm, added
+    # 2026-09-17. Its train.py/evaluate.py CLI differs from DM/RNNProp's, so
+    # the shared model_free_* budget above is translated in
+    # _build_train_config: num_epochs -> scale_num_problems (each sampled
+    # problem draws a fresh training batch, exactly one per epoch like
+    # train_dm.py's per-epoch problem() refresh), num_steps/unroll_length ->
+    # --fix_num_steps/--fix_unroll_length, eval_num_steps -> --num_testing_itrs.
+    # Architecture = experiment1.py's (the adapter has no default of its own).
+    scale_optimizer: str = "HierarchicalRNN"
+    scale_cell_cls: str = "GRUCell"
+    scale_cell_size: int = 20
+    scale_num_cells: int = 2
+    # Meta-iterations per sampled problem. 1 => every meta-update sees a
+    # fresh batch (DM/RNNProp parity: 100 epochs x 50 unrolls over 12,800
+    # distinct instances); Experiment 1 used num_problems=1 x 50 iterations,
+    # i.e. ONE fixed batch throughout, which together with the lr prior below
+    # is why L2O-Scale never solved LASSO there.
+    scale_num_meta_iterations: int = 1
+    # Internal-validation cadence, in meta-iterations, for model-best.l2o
+    # selection: with 1 meta-iteration per problem it must be 1 (evaluation
+    # fires on (k+1) % period == 0 inside the per-problem loop), i.e. once per
+    # problem with a single 1000-step restart -- 100 x 1 checks vs DM's
+    # 20 x 20; same selection rule (lowest validation cost), coarser sample.
+    scale_evaluation_period: int = 1
+    scale_evaluation_epochs: int = 1
+    # Initial per-coordinate learning-rate prior: log-uniform on
+    # [min_lr, max_lr] (hierarchical_rnn.py's init_lr_range). The library
+    # default (1e-6, 1e-2) has log-centre 1e-4, ~1000x below LASSO's 1/L ~ 0.2
+    # at (25,50); the optimizer must then learn 3 decades of lr growth and
+    # never does within budget (Exp 1; and the 2026-09-16 pilot arm A: R_f
+    # 4.2, cost bouncing 0.2-4 vs f* 0.036). Pilot-derived, NOT paper-sourced:
+    # (1e-3, 1e-1) reached R_f 0.075 / cost 0.038 with stable meta-gradients;
+    # (1e-2, 1.0) was noisier (R_f 0.39, 10x larger meta-gradient norms).
+    # Must be identical at train and eval (state is re-initialised at eval).
+    scale_min_lr: float = 1e-3
+    scale_max_lr: float = 1e-1
+    # "best" = model-best.l2o (lowest internal-validation cost), the analogue
+    # of train_dm.py's best-internal-eval `.l2l-0`. Same which-problem-was-best
+    # caveat as DM: read `evaluation k, cost=` in train.log before comparing.
+    scale_select_checkpoint: str = "best"
+
     # Model-based (LISTA/ALISTA). 16 layers is stated in both the Primer and
     # the ALISTA repo's own default. base_lr/train_batch_size are the Primer's
     # stated values (5e-4 / 128) made explicit rather than left to
@@ -244,6 +295,41 @@ class OrchestratorConfig:
 
 def _build_train_config(method_name: str, cfg: OrchestratorConfig, width_dir: str,
                         seed: int, run_name: str, output_dir: str) -> Dict[str, Any]:
+    if method_name == "l2o-scale":
+        train_flags: Dict[str, Any] = {
+            "optimizer": cfg.scale_optimizer,
+            "cell_cls": cfg.scale_cell_cls,
+            "cell_size": cfg.scale_cell_size,
+            "num_cells": cfg.scale_num_cells,
+            "lasso_data_dir": width_dir,
+            "lasso_split": "train_data.npy",
+            "lasso_batch_size": cfg.model_free_batch_size,
+            "lasso_lam": cfg.lam,
+            "num_problems": cfg.model_free_num_epochs,
+            "num_meta_iterations": cfg.scale_num_meta_iterations,
+            "fix_unroll": True,
+            "fix_unroll_length": cfg.model_free_unroll_length,
+            "fix_num_steps": cfg.model_free_num_steps,
+            "fix_num_steps_eval": cfg.model_free_num_steps,
+            "evaluation_period": cfg.scale_evaluation_period,
+            "evaluation_epochs": cfg.scale_evaluation_epochs,
+            # Only model-best/model-final are wanted; the per-iteration
+            # model-iter{k}.l2o files would be 100 x ~1 MB of dead weight.
+            "save_period": 10 ** 9,
+            "min_lr": cfg.scale_min_lr,
+            "max_lr": cfg.scale_max_lr,
+            "select_checkpoint": cfg.scale_select_checkpoint,
+        }
+        if cfg.model_free_profile:
+            train_flags["profile_path"] = os.path.join(output_dir, "profile.jsonl")
+        return {
+            "method": method_name,
+            "problem": "lasso_dataset",
+            "seed": seed,
+            "run_name": run_name,
+            "output_dir": output_dir,
+            "train": train_flags,
+        }
     if method_kind(method_name) == "model_free":
         train_flags: Dict[str, Any] = {
             "lasso_data_dir": width_dir,
@@ -342,18 +428,39 @@ def run_one(method_name: str, config: OrchestratorConfig, width_dir: str, seed: 
     if method_kind(method_name) == "model_free":
         for p in config.test_sparsities:
             eval_config = dict(train_config)
-            eval_config["eval"] = {
-                "optimizer": "L2L",
-                "lasso_data_dir": width_dir,
-                "lasso_split": _test_filename(p),
-                "lasso_batch_size": config.model_free_batch_size,
-                "num_steps": config.model_free_eval_num_steps,
-                # Must match train()'s lasso_lam, one for
-                # all three, so the metrics x*/f* stay comparable to all.
-                "lasso_lam": config.lam,
-                "num_fista_iters": config.num_fista_iters,
-                "xstar_cache_dir": xstar_cache_dir,
-            }
+            if method_name == "l2o-scale":
+                eval_config["eval"] = {
+                    "test_optimizer": "L2o",
+                    "num_testing_itrs": config.model_free_eval_num_steps,
+                    "lasso_data_dir": width_dir,
+                    "lasso_split": _test_filename(p),
+                    # Same chunk size as training on purpose: L2O-Scale's
+                    # tensor-level RNN and output scaling pool over the whole
+                    # (batch, n) tensor, so this is part of the optimizer's
+                    # input distribution, not just an efficiency knob.
+                    "lasso_batch_size": config.model_free_batch_size,
+                    "lasso_lam": config.lam,
+                    "lasso_x0_mode": "aligned",
+                    # Must match train() -- the per-coordinate lr state is
+                    # re-initialised from this prior at eval time.
+                    "min_lr": config.scale_min_lr,
+                    "max_lr": config.scale_max_lr,
+                    "num_fista_iters": config.num_fista_iters,
+                    "xstar_cache_dir": xstar_cache_dir,
+                }
+            else:
+                eval_config["eval"] = {
+                    "optimizer": "L2L",
+                    "lasso_data_dir": width_dir,
+                    "lasso_split": _test_filename(p),
+                    "lasso_batch_size": config.model_free_batch_size,
+                    "num_steps": config.model_free_eval_num_steps,
+                    # Must match train()'s lasso_lam, one for
+                    # all three, so the metrics x*/f* stay comparable to all.
+                    "lasso_lam": config.lam,
+                    "num_fista_iters": config.num_fista_iters,
+                    "xstar_cache_dir": xstar_cache_dir,
+                }
             if method_name == "l2o-rnnprop":
                 # Must match train()'s beta1/beta2 -- evaluate_rnnprop.py uses
                 # them to reconstruct the optimizer that the saved weights were
@@ -542,6 +649,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--model_free_num_epochs", type=int, default=None)
     p.add_argument("--model_free_num_steps", type=int, default=None)
     p.add_argument("--model_free_lr", type=float, default=None)
+    p.add_argument("--scale_min_lr", type=float, default=None,
+                   help="l2o-scale only: lower end of the log-uniform initial "
+                        "per-coordinate learning-rate prior (default 1e-3, "
+                        "pilot-derived; the library default 1e-6 never solves "
+                        "LASSO within budget). Applied at train AND eval.")
+    p.add_argument("--scale_max_lr", type=float, default=None,
+                   help="l2o-scale only: upper end of that prior (default 1e-1).")
+    p.add_argument("--scale_num_meta_iterations", type=int, default=None,
+                   help="l2o-scale only: meta-iterations per sampled training "
+                        "problem (default 1 = a fresh batch every meta-update).")
     p.add_argument("--model_based_num_layers", type=int, default=None)
     p.add_argument("--model_based_epochs", type=int, default=None)
     p.add_argument("--model_based_patience", type=int, default=None)
@@ -553,6 +670,22 @@ def _parse_args() -> argparse.Namespace:
                         "whether wide's worse own-center performance is a "
                         "sample-density artifact rather than a real "
                         "distribution-width tradeoff.")
+    p.add_argument("--m", type=int, default=None,
+                   help="Override the number of measurements (default 25). "
+                        "See --n.")
+    p.add_argument("--n", type=int, default=None,
+                   help="Override the signal dimension (default 50). Use "
+                        "--m 210 --n 300 to run this file's re-centered width "
+                        "scheme at the pre-study's own Table-3 dimensions: at "
+                        "n=50 the training widths quantize hard -- 'medium' "
+                        "[0.1125, 0.2375] covers only 7 distinct support sizes "
+                        "and 'wide' [0.05, 0.30] only 14 (round(p*n) nonzeros), "
+                        "so the width contrast that is this experiment's whole "
+                        "independent variable is lumpy. At n=300 the same "
+                        "ranges give 39 and 76. (The 11 TEST sparsities do stay "
+                        "distinct at n=50 -- 1,2,5,6,8,9,10,12,15,18,20 "
+                        "nonzeros -- so it is the training widths, not the test "
+                        "grid, that motivate the larger dims.)")
     p.add_argument("--model_free_curriculum", action="store_true",
                    help="Enable train_dm.py/train_rnnprop.py's --if_cl "
                         "(curriculum learning on unroll length).")
@@ -586,8 +719,10 @@ def main() -> None:
         cfg = OrchestratorConfig(results_dir=args.results_dir, seeds=args.seeds,
                                  methods=args.methods, widths=args.widths)
         for field_name in ("model_free_num_epochs", "model_free_num_steps", "model_free_lr",
+                           "scale_min_lr", "scale_max_lr", "scale_num_meta_iterations",
                            "model_based_num_layers", "model_based_epochs", "model_based_patience",
-                           "num_fista_iters", "model_based_training_curve_sparsity", "train_size"):
+                           "num_fista_iters", "model_based_training_curve_sparsity", "train_size",
+                           "m", "n"):
             value = getattr(args, field_name)
             if value is not None:
                 setattr(cfg, field_name, value)

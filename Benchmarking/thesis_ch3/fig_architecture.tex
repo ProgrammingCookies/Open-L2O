@@ -1,0 +1,65 @@
+% Figure 3.1 -- platform architecture.
+% Requires in the preamble:
+%   \usepackage{tikz}
+%   \usetikzlibrary{positioning, arrows.meta, fit, backgrounds, calc}
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rounded corners=2pt, minimum height=8mm, minimum width=26mm, align=center, fill=white},
+  lib/.style={box, minimum width=22mm, minimum height=10mm, fill=gray!10},
+  grp/.style={draw, dashed, rounded corners=4pt, inner sep=5pt},
+  arr/.style={-{Latex[length=2mm]}, thick},
+  lbl/.style={font=\footnotesize\itshape, gray!80!black},
+  node distance=6mm and 8mm,
+]
+% --- consumers (top) ---
+\node[box] (exp) {experiment script\\\texttt{experiments/*.py}};
+\node[box, right=of exp] (sweep) {sweep driver\\\texttt{sweep.py}};
+\node[box, right=of sweep] (cli) {CLI / suites\\\texttt{run.py}};
+
+% --- core (middle) ---
+\node[box, below=10mm of sweep] (runner) {runner\\\texttt{train\_evaluate(config)}};
+\node[box, left=of runner] (registry) {registry\\\texttt{get\_method(name)}};
+\node[box, right=of runner] (result) {\texttt{BenchmarkResult}\\\texttt{result.json}, trajectory};
+
+% --- adapters ---
+\node[box, below=10mm of runner, minimum width=70mm] (adapter)
+  {adapter: \texttt{L2OMethod.train / evaluate}\\
+   builds flags $\to$ \texttt{shell.run\_script} (validates flags, logs command) $\to$ reads artifacts};
+
+% --- libraries (bottom) ---
+\node[lib, below=10mm of adapter, xshift=-46mm] (dm) {L2O-DM /\\RNNProp};
+\node[lib, right=3mm of dm] (scale) {L2O-Scale /\\Entropy / Jacobian};
+\node[lib, right=3mm of scale] (swarm) {L2O-Swarm};
+\node[lib, right=3mm of swarm] (mb) {LISTA /\\ALISTA};
+\node[lib, right=3mm of mb] (cls) {Adam / SGD /\\Adagrad (host)};
+
+% --- shared inputs (left) ---
+\node[box, left=14mm of adapter, fill=gray!10, minimum width=24mm] (data)
+  {seeded dataset\\\texttt{data/lasso.py}\\$A, b, x_\mathrm{true}, x_0$};
+\node[box, below=4mm of data, fill=gray!10, minimum width=24mm] (metrics)
+  {metrics\\\texttt{lasso\_metrics.py}\\$x^\ast$ by FISTA};
+
+% --- groups ---
+\begin{scope}[on background layer]
+  \node[grp, fit=(exp)(sweep)(cli), label={[lbl]above left:consumers}] {};
+  \node[grp, fit=(registry)(runner)(result)(adapter), label={[lbl]above left:\texttt{Benchmarking/core} + \texttt{adapters}}] {};
+  \node[grp, fit=(dm)(scale)(swarm)(mb)(cls), label={[lbl]below left:migrated Open-L2O libraries, each run as a subprocess in its own directory}] {};
+\end{scope}
+
+% --- arrows ---
+\draw[arr] (exp) -- (sweep);
+\draw[arr] (sweep) -- (runner);
+\draw[arr] (cli) |- ($(runner.north)+(0,3mm)$) -- (runner.north);
+\draw[arr] (runner) -- (registry);
+\draw[arr] (runner) -- (result);
+\draw[arr] (runner) -- node[lbl, right] {config, seed} (adapter);
+\foreach \l in {dm, scale, swarm, mb, cls}
+  \draw[thick, {Latex[length=2mm]}-{Latex[length=2mm]}] (adapter.south) -- (\l.north);
+\draw[arr] (data.east) -- ++(6mm,0) |- (adapter.west);
+\draw[arr] (metrics.east) -| ($(adapter.south west)+(6mm,0)$);
+\end{tikzpicture}
+\caption{Architecture of the benchmarking platform. A config names a method and a problem; the runner looks the method up in the registry and calls its adapter, which runs the library's own training or evaluation script as a subprocess in that library's directory and normalises what it writes into a \texttt{BenchmarkResult}. Experiment scripts and the sweep driver sit on top as consumers. Every method reads the same seeded dataset files (including the shared starting point $x_0$) and is scored by the same metric functions.}
+\label{fig:platform-architecture}
+\end{figure}

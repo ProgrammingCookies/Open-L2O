@@ -1,0 +1,15 @@
+{
+  "run_name": "dm_simple_smoke",
+  "method": "l2o-dm",
+  "problem": "simple",
+  "output_dir": "results",
+  "train": {
+    "num_epochs": 5,
+    "num_steps": 50,
+    "unroll_length": 20
+  },
+  "eval": {
+    "optimizer": "L2L",
+    "num_steps": 100
+  }
+}

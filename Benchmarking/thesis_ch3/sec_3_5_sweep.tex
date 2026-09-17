@@ -1,0 +1,50 @@
+\section{Running experiments: the sweep driver}
+\label{sec:platform-sweep}
+
+The harness makes one \texttt{(method, problem, seed)} run work. An experiment
+is many such runs over a grid (seeds, problem sizes, training distributions),
+with results in one table, and the bookkeeping that entails is the same for
+every experiment. It is therefore factored into
+\texttt{experiments/sweep.py}, and every experiment in this thesis is a short
+script on top of it. Experiments are deliberately kept outside the core: they
+are consumers of the platform, not part of its interface, so adding an
+experiment never touches the code that other experiments depend on.
+
+An experiment declares a \texttt{SweepSpec}: the axes of the grid
+(\texttt{Axis("seed", ...)}, \texttt{Axis("method", ...)}, \ldots), optional
+\emph{prepare} hooks that run once per prefix of the grid (for example,
+generate the dataset once per seed and reuse it for every method), and the
+function \texttt{run\_cell} that turns one grid point into one or more result
+rows. The driver supplies everything else:
+\begin{itemize}
+  \item \emph{Resume.} Cells whose rows already exist in \texttt{results.jsonl}
+    are skipped, so a sweep that stops at hour 30 of 40 restarts at hour 30.
+  \item \emph{Error isolation.} A cell that raises is written to
+    \texttt{errors.jsonl} with its traceback and the sweep continues; a
+    \texttt{stop\_on\_error} switch inverts this while developing.
+  \item \emph{Correct axis fields.} The driver stamps each row with the axis
+    values it actually ran, so a table cannot record a seed the run did not
+    use.
+  \item \emph{Provenance}, as described in Section~\ref{sec:platform-repro}.
+  \item \emph{Summaries.} Every numeric field of every row is aggregated
+    across seeds into \texttt{summary.json}; the statistics are a parameter
+    (mean and standard deviation by default, extended rather than replaced),
+    and a metric added to a row appears in the summary without further code.
+  \item \emph{Command-line overrides} derived from the experiment's own
+    configuration dataclass, so a tunable is declared once.
+\end{itemize}
+What the driver deliberately does not own is the experiment's configuration
+and the translation of its hyperparameters into a library's flags. Flag names
+differ per library, and two experiments holding the same value for different
+reasons are not duplication: the reasons are the content, and they stay in
+each experiment's file.
+
+For goal (iii) the concrete deliverable is
+\texttt{experiments/experiment\_template.py}: a complete, runnable sweep
+(LISTA on a small LASSO dataset, a couple of minutes on a CPU) with four
+marked places to edit, namely the configuration dataclass, the prepare hook,
+the flag translation and \texttt{run\_cell}. A newcomer copies the template,
+edits those four places, and inherits resume, error isolation, provenance
+and summaries without writing any of them. The accompanying
+\texttt{CONTRIBUTING.md} walks through adding a new method the same way,
+assuming no prior knowledge of the repository.

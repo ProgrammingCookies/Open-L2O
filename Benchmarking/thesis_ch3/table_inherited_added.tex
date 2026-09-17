@@ -1,0 +1,46 @@
+% Table 3.1 -- what the platform inherited from Open-L2O and what this thesis added.
+% Requires: booktabs, array. Repo paths are relative to the repository root.
+\begin{table}[htbp]
+\centering
+\small
+\caption{Components of the benchmarking platform, by origin. \emph{Inherited} components are the Primer's Open-L2O code release~\cite{chen2021primer}; \emph{migrated} means ported to TensorFlow~2 / Keras~3 without functional change (Appendix~\ref{app:migration}); \emph{added} components were written for this thesis.}
+\label{tab:platform-origin}
+\begin{tabular}{@{} p{0.30\linewidth} l p{0.44\linewidth} @{}}
+\toprule
+Component & Origin & Location / notes \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Method implementations}} \\
+L2O-DM, L2O-RNNProp (one library) & inherited, migrated & \texttt{Model\_Free\_L2O/L2O-DM and L2O-RNNProp/} \\
+L2O-Scale & inherited, migrated & \texttt{Model\_Free\_L2O/L2O-Scale/}; training and evaluation trees unified \\
+L2O-Entropy, L2O-Jacobian & inherited, migrated & built on the unified L2O-Scale tree \\
+L2O-Swarm & inherited, migrated & \texttt{Model\_Free\_L2O/L2O-Swarm/} \\
+LISTA, ALISTA (model-based library) & inherited, migrated & \texttt{Model\_Base\_L2O/}; 7 further unrolled variants present but not wired \\
+Classical optimizers (Adam, SGD, Adagrad) & inherited & run through a host library's evaluation harness \\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{Unified pipeline (goal i)}} \\
+Method contract, registry, result containers, runner & added & \texttt{Benchmarking/core/} \\
+Subprocess adapters, one per method family & added & \texttt{Benchmarking/adapters/} \\
+Flag validation against the target script & added & \texttt{core/shell.py} \\
+Command-line entry point and suites & added & \texttt{Benchmarking/run.py} \\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{Reproducibility and fairness (goal ii)}} \\
+Seed threading into training and evaluation of every method & added & each library's \texttt{train.py}/\texttt{evaluate.py} accepts \texttt{--seed} \\
+Deterministic full-pass evaluation over the test set & added & model-free \texttt{problems.py}, \texttt{evaluate\_*.py} \\
+Shared per-instance starting point $x_0$ for every method & added & generator writes \texttt{*\_x0.npy}; LISTA/ALISTA layer~0 consumes it \\
+Provenance capture (commands, git state, diffs, hashes, timings) & added & \texttt{core/runner.py}, \texttt{experiments/sweep.py} \\
+Instances-fingerprint contract and determinism/fairness test suite & added & \texttt{core/fingerprint.py}, \texttt{Benchmarking/tests/} \\
+Container image with pinned dependencies & added & \texttt{Dockerfile} \\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{Extensibility (goal iii)}} \\
+Sweep driver (grid, resume, error isolation, summaries) & added & \texttt{experiments/sweep.py} \\
+Runnable experiment template & added & \texttt{experiments/experiment\_template.py} \\
+Contributor guide and reference documentation & added & \texttt{CONTRIBUTING.md}, \texttt{README.md} \\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{Experiment support (goal iv)}} \\
+LASSO dataset generator (widths, test battery, $x_0$, ALISTA $W$) & added & \texttt{Benchmarking/data/lasso.py} \\
+Experiment-2 metric functions and reference solver & added & \texttt{core/lasso\_metrics.py} \\
+Classical ISTA/FISTA baselines on the same instances & added & \texttt{Benchmarking/classical\_baselines.py} \\
+Per-iteration relative-loss curves for the learned optimizer & added & \texttt{Benchmarking/plot\_compute\_matched\_rf.py} \\
+\bottomrule
+\end{tabular}
+\end{table}

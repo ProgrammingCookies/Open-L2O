@@ -1,0 +1,17 @@
+\section{Prerequisite: one environment}
+\label{sec:platform-migration}
+
+A unified pipeline presupposes that all methods can run in one software
+environment, and the Open-L2O libraries could not: they were written for
+TensorFlow~1 with graph-mode execution and mutually incompatible dependency
+pins, none of which install on a current Python. The first step was therefore
+to port all six libraries to TensorFlow~2 with Keras~3 and eager execution.
+The port was kept mechanical on purpose. Model architectures, meta-training
+loops, script names, existing flags and output files are unchanged, and features that
+no documented command exercises were left out rather than rewritten. This is
+what allows the methods compared in Chapter~\ref{ch:exp2} to be described as
+the Primer's methods rather than re-implementations of them. Each library was
+verified after the port by running its own training-then-evaluation commands
+end to end. Appendix~\ref{app:migration} lists the libraries, the structural
+changes each required (for example, L2O-Scale's separate training and
+evaluation trees were merged into one) and how each was checked.

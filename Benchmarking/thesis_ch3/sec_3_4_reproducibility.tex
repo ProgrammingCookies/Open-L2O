@@ -1,0 +1,86 @@
+\section{Reproducibility and fairness}
+\label{sec:platform-repro}
+
+The pre-study (Section~\ref{sec:prestudy-repro}) asked for fixed seeds and
+repeated runs. In a benchmark that compares methods, fixing a seed is
+necessary but not sufficient: the comparison is fair only if every method is
+trained and evaluated on the same problem instances from the same starting
+points, and it is reproducible only if the code that produced a number can be
+identified afterwards. The platform provides both as mechanisms rather than
+as conventions the user must remember.
+
+\paragraph{One seed, threaded everywhere.}
+A config carries one top-level \texttt{seed}. The runner copies it into the
+evaluation flags, and every adapter reads it for training; all six
+libraries' \texttt{train.py} and \texttt{evaluate.py} accept \texttt{--seed},
+added wherever a script did not already expose one. On the training side the seed fixes weight initialisation and the
+sampling of unroll segments; for the model-free optimizers this was verified
+to be bit-exact across separate processes. On the evaluation side it fixes which
+instances are evaluated and where each trajectory starts.
+
+\paragraph{Every method sees the same instances.}
+For the LASSO experiments, evaluation never draws from a mutable random
+state. The model-free evaluation scripts walk the test split with a plain
+integer cursor, batch by batch, covering every instance exactly once; the
+model-based test path applies no shuffling. Consequently the number of random
+draws a method consumed during training, which differs between methods,
+cannot change which instances it is scored on. This is not left to code
+reading: every LASSO-capable adapter reports an \emph{instances fingerprint},
+a hash of the $b$, $x_\mathrm{true}$ and $x_0$ arrays its evaluation script
+actually consumed, in the order it consumed them, which is stored with the
+run's metrics and therefore in every sweep's result rows. A test suite
+(\texttt{Benchmarking/tests/}) asserts that all methods in a cell report
+the same fingerprint and that the count equals the size of the test split,
+both live on a small generated fixture and post hoc on any completed sweep;
+for the sweeps of Chapter~\ref{ch:exp2} every cell agrees. The fingerprint
+is problem-agnostic (it hashes named arrays; what they are is the adapter's
+choice), so a new problem is covered by adding one entry to the test matrix.
+
+\paragraph{The same run twice.}
+The same test suite evaluates every method twice with the same seed and
+requires identical trajectories (bit-exact for the file-based problems), and,
+for problems whose instances are drawn from the seed, that two seeds do not
+produce the same run.
+
+\paragraph{Every method starts from the same point.}
+Each split file has a seeded sibling \texttt{*\_x0.npy} holding one starting
+vector $x_0$ per instance (Section~\ref{sec:platform-data}). Originally the
+model-free optimizers drew a random $x_0$ at evaluation time and the unrolled
+networks implicitly started from $x_0 = 0$, so early iterates were not
+comparable across methods. Now all four Experiment-2 methods consume the same
+$x_0$: the model-free optimizee is initialised from the file, and for LISTA
+and ALISTA the vector is appended to the network input and consumed by layer
+zero. For LISTA this required a fixed, non-trainable first step
+$x_1 = S_{\theta_1}\big((I - BA)\,x_0 + B b\big)$, i.e.\ one ISTA step from
+$x_0$, so that the network keeps exactly $T$ learnable layers; ALISTA's layer
+formula already generalises to a nonzero start. The layer-zero outputs were
+checked against an independent hand computation of one ISTA step, and the
+model-free optimizers' first recorded objective value against the mean
+$f(x_0)$ computed directly from the file.
+
+\paragraph{Provenance.}
+Every run records the exact subprocess command lines, wall-clock timings and
+the seed alongside its metrics. A sweep additionally records the git commit,
+branch and working-tree status, a diff of uncommitted changes, and a SHA-256
+hash of every untracked Python file, together with a snapshot of the sweep's
+own configuration. The reason for going beyond a commit hash is practical:
+during a multi-day sweep the code that produced a row is usually not yet
+committed, and a commit hash alone would identify the wrong code.
+
+\paragraph{Environment.}
+All experiments reported in this thesis ran inside one container image built
+from the repository's \texttt{Dockerfile}: Python 3.12 with TensorFlow 2.21
+and Keras 3.15 in an isolated virtual environment (the release's single
+PyTorch library gets a second one, because the two frameworks pin conflicting
+CUDA packages), on a single 8\,GB consumer GPU. A run is resumable: the sweep
+driver skips cells whose rows already exist, so a stopped container continues
+where it left off with no change in results.
+
+\paragraph{A known gap.}
+Seeding fixes \emph{which} problem is evaluated, not every floating-point
+detail of evaluating it. For neural-network optimizees in the L2O-Scale family
+(MNIST classifiers) two runs with the same seed differ by about $0.1\%$,
+attributable to non-deterministic kernels and Keras layer initialisation that
+bypasses the seed argument; this predates the platform. The LASSO problems used
+in this thesis are unaffected: their instances are read from files and their
+evaluation is a deterministic pass.

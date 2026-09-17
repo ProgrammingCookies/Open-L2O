@@ -1,0 +1,28 @@
+% Chapter 3 -- The benchmarking platform. Draft 2026-09-16.
+%
+% Preamble requirements: booktabs, array, tikz (+ positioning, arrows.meta, fit,
+% backgrounds, calc), amsmath. \graphicspath / \input paths assume this folder is
+% copied to <overleaf-root>/thesis_ch3/. Adjust the \input paths otherwise.
+%
+% Cross-references used but defined elsewhere in the thesis:
+%   ch:platform (this chapter), ch:exp2, app:migration (appendix_migrated_libraries.tex),
+%   sec:existing-benchmarks, sec:planned-extensions, sec:prestudy-repro, sec:prestudy-exp2
+%   (background chapter, from the pre-study §6, §7.4, §7.3, §7.2),
+%   eq:subopt-gap, eq:rel-loss, eq:nmse (pre-study Eqs. 9-11).
+% Citation keys used (rename to your .bib): chen2021primer, andrychowicz2016, lv2017,
+%   wichrowska2017, yang2023, halo2020, cao2019swarm, gregor2010, liu2019alista,
+%   odonoghue2015restart.
+
+\chapter{The benchmarking platform}
+\label{ch:platform}
+
+\input{thesis_ch3/sec_3_1_starting_point}
+\input{thesis_ch3/sec_3_2_migration}
+\input{thesis_ch3/sec_3_3_harness}
+\input{thesis_ch3/sec_3_4_reproducibility}
+\input{thesis_ch3/sec_3_5_sweep}
+\input{thesis_ch3/sec_3_6_data_metrics}
+\input{thesis_ch3/sec_3_7_limitations}
+
+% Appendix (place after \appendix in the main file):
+% \input{thesis_ch3/appendix_migrated_libraries}

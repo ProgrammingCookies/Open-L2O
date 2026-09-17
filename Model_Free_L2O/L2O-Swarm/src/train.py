@@ -3,7 +3,11 @@
 import argparse
 import os
 import pickle
+import random
 from timeit import default_timer as timer
+
+import numpy as np
+import tensorflow as tf
 
 import meta
 import util
@@ -21,6 +25,9 @@ def parse_args():
     p.add_argument("--unroll_length", type=int, default=20)
     p.add_argument("--learning_rate", type=float, default=0.001)
     p.add_argument("--second_derivatives", action="store_true")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seeds random/numpy/TF RNGs before problem/optimizer "
+                        "construction for reproducible training.")
     return p.parse_args()
 
 
@@ -42,6 +49,10 @@ def run_epoch(optimizer, problem, num_unrolls, unroll_length, second_derivatives
 
 def main():
     FLAGS = parse_args()
+    if FLAGS.seed is not None:
+        random.seed(FLAGS.seed)
+        np.random.seed(FLAGS.seed)
+        tf.random.set_seed(FLAGS.seed)
 
     num_unrolls = FLAGS.num_steps // FLAGS.unroll_length
     problem, net_config, net_assignments = util.get_config(FLAGS.problem)

@@ -1,0 +1,32 @@
+\section{Limitations}
+\label{sec:platform-limitations}
+
+The platform is a first version, and its boundaries should be stated.
+\begin{itemize}
+  \item \emph{Comparable shape, not comparable cost.} The trajectory contract
+    aligns methods on iteration count. One model-free step, one classical
+    iteration and one unrolled layer do very different amounts of work, and
+    the harness does not measure FLOPs or wall-clock per step. Any
+    matched-budget statement is iteration-matched, which favours the
+    model-free optimizers.
+  \item \emph{Coverage.} Only LISTA and ALISTA of the nine unrolled variants
+    in the model-based library are wired into the harness, and only they
+    consume the shared $x_0$. Classical-optimizer support depends on the host
+    library: the L2O-Scale family exposes SGD, Adam and Adagrad, the others
+    only Adam. The L2O-Scale family trains and evaluates on different problem
+    sets by design, which the adapter maps separately.
+  \item \emph{Unstandardised per-instance breakdowns.} Beyond the four
+    trajectory summaries, the optional \texttt{per\_seed} field of an
+    evaluation result has an adapter-specific shape (per seed, per test file,
+    or otherwise), so generic downstream code cannot interpret it without
+    knowing the adapter.
+  \item \emph{Suites are not problem-checked.} Nothing prevents a suite from
+    ranking methods evaluated on different problems in one leaderboard; suites
+    must be kept problem-scoped by the user.
+  \item \emph{Evaluation determinism} is exact for the file-based LASSO
+    problems but not for the neural-network optimizees of the L2O-Scale
+    family (Section~\ref{sec:platform-repro}).
+  \item \emph{Scale.} All results were produced on one 8\,GB GPU inside one
+    container; the platform has no notion of distributing a sweep across
+    machines, and sweeps are hours to days long.
+\end{itemize}
