@@ -239,6 +239,8 @@ def lasso_from_dataset(data_dir, split="train_data.npy", batch_size=128, l=0.005
             x0_init = tf.random.normal((len(idx), n), stddev=x0_stddev, dtype=dtype)
         else:
             x0_init = tf.constant(x0_data[idx], dtype=dtype)
+        # Saved so the eval scripts can check that the x0 is actually used (checked in Benchmarking/core/fingerprint.py's instances fingerprint))
+        build.last_x0 = x0_init.numpy()
         x = tf.Variable(x0_init, name="x")
         b_const = tf.constant(batch[:, :m], dtype=dtype)
 

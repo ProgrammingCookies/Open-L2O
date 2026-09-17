@@ -22,6 +22,7 @@ import numpy as np
 
 from core.config import require
 from core.lasso_metrics import evaluate_lasso_recovery
+from core.fingerprint import METRIC_KEY as FINGERPRINT_KEY, fingerprint_arrays
 from core.method import L2OMethod
 from core.result import EvalOutput, TrainOutput, summarize_trajectory
 from core.shell import REPO_ROOT, run_script
@@ -111,10 +112,16 @@ class DMRNNPropMethod(L2OMethod):
         # FISTA-computed x* reference gives fair scoring.
         recovery_path = os.path.join(output_path, "{}_recovery-{}.npz".format(opt, problem))
         if os.path.exists(recovery_path):
+            rec = np.load(recovery_path)
+            artifacts["recovery"] = recovery_path
+            # What the script actually evaluated (instances in walk order and
+            # the starting point it used), for tests/test_fairness.py. x0 is
+            # absent from .npz files written before 2026-09-17.
+            metrics[FINGERPRINT_KEY] = fingerprint_arrays(
+                b=rec["b"], x_true=rec["x_true"],
+                x0=rec["x0"] if "x0" in rec.files else None)
             lasso_data_dir = config.get("eval", {}).get("lasso_data_dir")
             if lasso_data_dir is not None:
-                artifacts["recovery"] = recovery_path
-                rec = np.load(recovery_path)
                 a = np.load(os.path.join(lasso_data_dir, "A.npy")).astype(np.float32)
                 # Required only inside this lasso-recovery branch (unlike
                 # model_based.py's evaluate(), which always runs task="lasso" so

@@ -18,7 +18,9 @@
 import argparse
 import os
 import pickle
+import random
 
+import numpy as np
 import tensorflow as tf
 
 import metaopt
@@ -83,6 +85,23 @@ def parse_args():
     p.add_argument("--include_mnist_conv_problems", action="store_true")
     p.add_argument("--include_mnist_conv_orig_problems", action="store_true")
     p.add_argument("--include_cifar10_conv_problems", action="store_true")
+    p.add_argument("--include_lasso_problems", action="store_true",
+                   help="Evaluate on a pre-generated LASSO dataset split (see "
+                        "Benchmarking/data/lasso.py): one deterministic pass over "
+                        "every row of --lasso_split, --lasso_batch_size rows at a "
+                        "time, from the split's seeded x0 (--lasso_x0_mode aligned). "
+                        "Replaces the [6, 12, 18, 24, 30] seed sweep.")
+    p.add_argument("--lasso_data_dir", default=None,
+                   help="Directory holding A.npy + split .npy files. Required with "
+                        "--include_lasso_problems.")
+    p.add_argument("--lasso_split", default="val_data.npy")
+    p.add_argument("--lasso_batch_size", type=int, default=128,
+                   help="Rows per chunk. Use the TRAINING batch size: the "
+                        "tensor-level RNN input and the output scaling pool over "
+                        "the whole (batch, n) tensor, so the chunk size changes the "
+                        "statistics the optimizer sees.")
+    p.add_argument("--lasso_lam", type=float, default=0.005)
+    p.add_argument("--lasso_x0_mode", default="aligned", choices=["aligned", "random"])
 
     p.add_argument("--min_lr", type=float, default=1e-6)
     p.add_argument("--max_lr", type=float, default=1e-2)
@@ -111,8 +130,9 @@ def parse_args():
     p.add_argument("--restore_model_name", default="model-final.l2o",
                    help="Checkpoint filename (relative to --train_dir/<optimizer dir>) to load.")
     p.add_argument("--seed", type=int, default=None,
-                   help="If given, evaluate on just this seed instead of the default "
-                        "sweep [6, 12, 18, 24, 30].")
+                   help="If given, seeds random/numpy/TF (reproducible lr-prior "
+                        "init and starting points) and evaluates on just this "
+                        "seed instead of the default sweep [6, 12, 18, 24, 30].")
     return p.parse_args()
 
 
@@ -152,6 +172,16 @@ def _build_l2o_optimizer(FLAGS):
 def main():
     FLAGS = parse_args()
 
+    # Same three RNGs train.py seeds. Without this the evaluation is not
+    # reproducible: HierarchicalRNN draws every coordinate's initial log-lr
+    # with tf.random.uniform(seed=None) each time an optimizer is built
+    # (hierarchical_rnn.py's _initialize_state), so two runs of the same
+    # checkpoint on the same data would start from different lr priors.
+    if FLAGS.seed is not None:
+        random.seed(FLAGS.seed)
+        np.random.seed(FLAGS.seed)
+        tf.random.set_seed(FLAGS.seed)
+
     problems_and_data = []
     if FLAGS.include_mnist_mlp_problems:
         problems_and_data.extend(ps.test_mnist_mlp_problems())
@@ -166,7 +196,14 @@ def main():
     if FLAGS.include_cifar10_conv_problems:
         problems_and_data.extend(ps.test_cifar10_conv_problems())
 
-    if not problems_and_data:
+    if FLAGS.include_lasso_problems:
+        if FLAGS.lasso_data_dir is None:
+            raise ValueError("--include_lasso_problems requires --lasso_data_dir")
+        if problems_and_data:
+            raise ValueError("--include_lasso_problems cannot be combined with other "
+                             "--include_*_problems flags (its evaluation loop differs)")
+
+    if not problems_and_data and not FLAGS.include_lasso_problems:
         raise ValueError("No problems selected -- pass at least one --include_*_problems flag.")
 
     logdir = os.path.join(FLAGS.train_dir, "{}_{}_{}_{}".format(
@@ -183,6 +220,35 @@ def main():
 
     os.makedirs(FLAGS.save_dir, exist_ok=True)
 
+    def make_test_optimizer(problem, dataset, seed):
+        """A fresh optimizer per evaluation run: the L2O one rebuilt and
+        reloaded from checkpoint_path (a dummy step first builds every
+        sub-layer's weights -- BiasGRUCell's gate/candidate affines build
+        lazily on first call), or a baseline optimizer."""
+        if FLAGS.test_optimizer != "L2o":
+            return BASELINE_OPTIMIZERS[FLAGS.test_optimizer]()
+        opt = _build_l2o_optimizer(FLAGS)
+        if os.path.exists(checkpoint_path):
+            dummy_params = problem.init_variables(seed)
+            if dataset is not None:
+                dummy_data = dataset.data[:2]
+                dummy_labels = dataset.labels[:2]
+            else:
+                dummy_data = dummy_labels = None
+            with tf.GradientTape() as tape:
+                dummy_obj = problem.objective(dummy_params, dummy_data, dummy_labels)
+            dummy_grads = problem.gradients(dummy_obj, dummy_params, tape)
+            opt.apply_gradients(zip(dummy_grads, dummy_params))
+            opt.load(checkpoint_path)
+        else:
+            print("WARNING: no checkpoint found at {}, evaluating untrained optimizer".format(
+                checkpoint_path))
+        return opt
+
+    if FLAGS.include_lasso_problems:
+        _evaluate_lasso_split(FLAGS, make_test_optimizer)
+        return
+
     for problem_itr, (problem_spec_, dataset, batch_size) in enumerate(problems_and_data):
         problem = problem_spec_.build()
         problem_name = FLAGS.train_dir.split("/")[0]
@@ -191,28 +257,7 @@ def main():
             print("testing problem {} ({}) using seed {}".format(
                 problem_itr, problem_name, seed))
 
-            if FLAGS.test_optimizer == "L2o":
-                opt = _build_l2o_optimizer(FLAGS)
-                if os.path.exists(checkpoint_path):
-                    # Trigger a dummy step to build every sub-layer's weights
-                    # (BiasGRUCell's gate/candidate affines build lazily on
-                    # first call), then load the saved ones.
-                    dummy_params = problem.init_variables(seed)
-                    if dataset is not None:
-                        dummy_data = dataset.data[:2]
-                        dummy_labels = dataset.labels[:2]
-                    else:
-                        dummy_data = dummy_labels = None
-                    with tf.GradientTape() as tape:
-                        dummy_obj = problem.objective(dummy_params, dummy_data, dummy_labels)
-                    dummy_grads = problem.gradients(dummy_obj, dummy_params, tape)
-                    opt.apply_gradients(zip(dummy_grads, dummy_params))
-                    opt.load(checkpoint_path)
-                else:
-                    print("WARNING: no checkpoint found at {}, evaluating untrained optimizer".format(
-                        checkpoint_path))
-            else:
-                opt = BASELINE_OPTIMIZERS[FLAGS.test_optimizer]()
+            opt = make_test_optimizer(problem, dataset, seed)
 
             objective_values, _, _ = metaopt.test_optimizer(
                 opt, problem, num_iter=FLAGS.num_testing_itrs,
@@ -223,6 +268,62 @@ def main():
                 "seed{}_eval_loss_record.pickle-{}".format(seed, FLAGS.model_name))
             with open(out_path, "wb") as f:
                 pickle.dump(objective_values, f)
+
+
+def _evaluate_lasso_split(FLAGS, make_test_optimizer):
+    """One deterministic pass over every row of --lasso_split, in file order,
+    --lasso_batch_size rows at a time, each chunk optimized from its seeded x0
+    with a freshly (re)loaded optimizer. Mirrors evaluate_dm.py's
+    lasso_dataset loop in L2O-DM and L2O-RNNProp so the four methods are scored
+    on identical instances and starting points.
+
+    Writes, under --save_dir:
+      seed{seed}_eval_loss_record.pickle-<model_name>: per-step objective,
+        each step averaged over every test instance (same layout as the
+        other problems' records; one file, since the split IS the sweep);
+      L2o_recovery-lasso_dataset.npz: x_pred / x_true / b / x0 for the whole split,
+        row-aligned with the split file (same keys as evaluate_dm.py's).
+    """
+    from problems import problem_generator as pg
+
+    data_path = os.path.join(FLAGS.lasso_data_dir, FLAGS.lasso_split)
+    num_samples = np.load(data_path, mmap_mode="r").shape[0]
+    seed = FLAGS.seed if FLAGS.seed is not None else 0
+    chunk = FLAGS.lasso_batch_size
+
+    sum_costs = None
+    x_pred_chunks, x_true_chunks, b_chunks, x0_chunks = [], [], [], []
+    for start in range(0, num_samples, chunk):
+        idx = np.arange(start, min(start + chunk, num_samples))
+        problem = pg.Lasso(FLAGS.lasso_data_dir, split=FLAGS.lasso_split,
+                           lam=FLAGS.lasso_lam, indices=idx, x0_mode=FLAGS.lasso_x0_mode)
+        print("testing lasso rows {}-{} of {} using seed {}".format(
+            idx[0], idx[-1], num_samples, seed), flush=True)
+        opt = make_test_optimizer(problem, None, seed)
+        objective_values, parameters, _ = metaopt.test_optimizer(
+            opt, problem, num_iter=FLAGS.num_testing_itrs, seed=seed)
+        costs = np.asarray(objective_values, dtype=np.float64)
+        sum_costs = costs if sum_costs is None else sum_costs + costs
+        x_pred_chunks.append(parameters[0])
+        x_true_chunks.append(problem.x_true)
+        b_chunks.append(problem.b.numpy())
+        x0_chunks.append(problem.last_x0)
+
+    num_chunks = len(x_pred_chunks)
+    loss_record = (sum_costs / num_chunks).tolist()
+    out_path = os.path.join(
+        FLAGS.save_dir, "seed{}_eval_loss_record.pickle-{}".format(seed, FLAGS.model_name))
+    with open(out_path, "wb") as f:
+        pickle.dump(loss_record, f)
+    print("Saving evaluate loss record {}".format(out_path))
+
+    recovery_file = os.path.join(FLAGS.save_dir, "L2o_recovery-lasso_dataset.npz")
+    np.savez(recovery_file,
+             x_pred=np.concatenate(x_pred_chunks, axis=0),
+             x_true=np.concatenate(x_true_chunks, axis=0),
+             b=np.concatenate(b_chunks, axis=0),
+             x0=np.concatenate(x0_chunks, axis=0))
+    print("Saving recovered signal + ground truth {}".format(recovery_file))
 
 
 if __name__ == "__main__":

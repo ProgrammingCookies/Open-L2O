@@ -34,6 +34,7 @@ import numpy as np
 
 from core.config import require
 from core.lasso_metrics import evaluate_lasso_recovery
+from core.fingerprint import METRIC_KEY as FINGERPRINT_KEY, fingerprint_arrays
 from core.method import L2OMethod
 from core.result import EvalOutput, TrainOutput, summarize_trajectory
 from core.shell import REPO_ROOT, run_script
@@ -272,9 +273,23 @@ def _read_model_based_eval(model_dir: str, data_dir: str, test_files: List[str],
             b = split_data[:, :m]
             x_true = split_data[:, m:]
             x_pred = np.load(output_path).astype(np.float32)
+            if x_pred.shape[0] != split_data.shape[0]:
+                raise ValueError(
+                    "{} has {} rows but {} has {}: the test pass did not cover the "
+                    "split exactly once".format(output_path, x_pred.shape[0], fname,
+                                               split_data.shape[0]))
+            # Instances fingerprint. Model_Base_L2O/train.py's test mode writes
+            # only x_pred, so b/x_true/x0 are taken from the split files in file
+            # order -- the order data_preprocessing.input_fn(is_training=False)
+            # walks them (no shuffle; covered by
+            # tests/test_model_based_input_order.py). The row-count check above
+            # is the part observed from the script itself.
+            x0_path = os.path.join(data_dir, fname[:-len(".npy")] + "_x0.npy")
+            x0 = np.load(x0_path).astype(np.float32) if os.path.exists(x0_path) else None
             recovery = evaluate_lasso_recovery(a, b, x_true, x_pred, lam,
                                                num_fista_iters=num_fista_iters,
                                                xstar_cache_dir=xstar_cache_dir).to_dict()
+            recovery[FINGERPRINT_KEY] = fingerprint_arrays(b=b, x_true=x_true, x0=x0)
             summary.update(recovery)
             if i == 0:
                 representative_recovery = recovery

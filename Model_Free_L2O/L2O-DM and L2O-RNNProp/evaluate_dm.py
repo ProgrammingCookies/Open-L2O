@@ -77,6 +77,7 @@ def main():
     x_pred_chunks = []
     x_true_chunks = []
     b_chunks = []
+    x0_chunks = []
     final_x_value = None
 
     for e in range(num_batches):
@@ -141,6 +142,7 @@ def main():
             x_pred_chunks.append(final_x_value)
             x_true_chunks.append(problem.last_x_true)
             b_chunks.append(problem.last_b)
+            x0_chunks.append(problem.last_x0)
         else:
             loss_record.extend(costs)
 
@@ -169,7 +171,8 @@ def main():
             np.savez(recovery_file,
                      x_pred=np.concatenate(x_pred_chunks, axis=0),
                      x_true=np.concatenate(x_true_chunks, axis=0),
-                     b=np.concatenate(b_chunks, axis=0))
+                     b=np.concatenate(b_chunks, axis=0),
+                     x0=np.concatenate(x0_chunks, axis=0))
             print("Saving recovered signal + ground truth {}".format(recovery_file))
         else:
             x_true = getattr(problem, "last_x_true", None)
@@ -178,7 +181,9 @@ def main():
                 recovery_file = os.path.join(
                     FLAGS.output_path,
                     "{}_recovery-{}.npz".format(FLAGS.optimizer, FLAGS.problem))
-                np.savez(recovery_file, x_pred=final_x_value, x_true=x_true, b=b_value)
+                x0_value = getattr(problem, "last_x0", None)
+                extra = {"x0": x0_value} if x0_value is not None else {}
+                np.savez(recovery_file, x_pred=final_x_value, x_true=x_true, b=b_value, **extra)
                 print("Saving recovered signal + ground truth {}".format(recovery_file))
 
 

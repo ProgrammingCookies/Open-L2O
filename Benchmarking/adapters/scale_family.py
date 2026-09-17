@@ -11,6 +11,13 @@ All three share an identical CLI as follows:
               --num_testing_itrs N --model_name <tag> --include_<problem>_problems
               => per-seed pickles seed{6,12,18,24,30}_eval_loss_record.pickle-<tag>,
                  each a flat list of objective values over num_testing_itrs.
+
+For problem="lasso_dataset" (L2O-Scale only -- Entropy/Jacobian's evaluate.py
+have no LASSO flags) evaluate.py instead walks --lasso_split deterministically
+from the split's seeded x0 and also writes L2o_recovery-lasso_dataset.npz
+(x_pred/x_true/b/x0); evaluate() then recomputes the Experiment-2 recovery
+metrics from it exactly as adapters/dm_rnnprop.py does, so every method's
+x_pred is scored with the identical metric code and the identical FISTA x*.
 """
 
 from __future__ import annotations
@@ -20,7 +27,11 @@ import os
 import pickle
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 from core.config import require
+from core.lasso_metrics import evaluate_lasso_recovery
+from core.fingerprint import METRIC_KEY as FINGERPRINT_KEY, fingerprint_arrays
 from core.method import L2OMethod
 from core.result import EvalOutput, TrainOutput, summarize_trajectory
 from core.shell import REPO_ROOT, run_script
@@ -43,7 +54,19 @@ PROBLEM_MAP: Dict[str, Dict[str, Dict[str, Any]]] = {
         "train": {"include_quadratic_problems": True},
         "eval": {"include_mnist_mlp_problems": True},
     },
+    # Pre-generated LASSO dataset (Benchmarking/data/lasso.py). Both phases
+    # also need lasso_data_dir / lasso_split / lasso_batch_size / lasso_lam
+    # from the config, passed through like any other train/eval flag.
+    "lasso_dataset": {
+        "train": {"include_lasso_problems": True},
+        "eval": {"include_lasso_problems": True},
+    },
 }
+
+_LASSO_RECOVERY_FILE = "L2o_recovery-lasso_dataset.npz"
+# Config keys consumed by evaluate() itself (metric recomputation), never
+# passed to evaluate.py -- same convention as adapters/dm_rnnprop.py.
+_EVAL_CONFIG_ONLY_KEYS = ("num_fista_iters", "xstar_cache_dir")
 
 
 class ScaleFamilyMethod(L2OMethod):
@@ -90,10 +113,24 @@ class ScaleFamilyMethod(L2OMethod):
             flags["seed"] = config["seed"]
         flags.update(config.get("train", {}))
 
+        # select_checkpoint is consumed here, not a train.py flag: "final" (the
+        # default, model-final.l2o) or "best" (model-best.l2o, the lowest
+        # internal-validation cost -- the analogue of train_dm.py's
+        # best-internal-eval `.l2l-0`, for like-for-like checkpoint selection).
+        select = flags.pop("select_checkpoint", "final")
+        if select not in ("final", "best"):
+            raise ValueError("{}: config['train']['select_checkpoint'] must be 'final' "
+                             "or 'best', got {!r}".format(self.name, select))
+
         cmd = run_script(self.lib_dir, "train.py", flags,
                          log_path=os.path.join(output_dir, "train.log"))
         logdir = self._logdir(output_dir, config)
-        ckpt = os.path.join(logdir, "model-final.l2o")
+        ckpt = os.path.join(logdir, "model-{}.l2o".format(select))
+        if select == "best" and not os.path.exists(ckpt):
+            raise FileNotFoundError(
+                "{}: select_checkpoint='best' but {} was not written -- train.py only "
+                "saves it when an evaluation ran (evaluation_period must divide "
+                "num_meta_iterations)".format(self.name, ckpt))
         return TrainOutput(
             checkpoint=ckpt,
             metrics={"logdir": logdir},
@@ -112,8 +149,19 @@ class ScaleFamilyMethod(L2OMethod):
         eval_cfg = config.get("eval", {})
         test_optimizer = require(eval_cfg, "test_optimizer",
             "{} requires config['eval']['test_optimizer']".format(self.name))
+        # evaluate.py locates the checkpoint as <train_dir>/<optimizer tag>/
+        # <restore_model_name>. When the caller hands us the checkpoint path
+        # (train()'s TrainOutput.checkpoint) derive both from it, so evaluating
+        # into a different output_dir than train() used (e.g. Experiment 2's
+        # per-sparsity eval_p*/ subdirs) still finds the trained weights.
+        if checkpoint is not None:
+            train_dir = os.path.dirname(os.path.dirname(os.path.abspath(checkpoint)))
+            restore_model_name = os.path.basename(checkpoint)
+        else:
+            train_dir = self._train_dir(output_dir)
+            restore_model_name = None
         flags: Dict[str, Any] = {
-            "train_dir": self._train_dir(output_dir),
+            "train_dir": train_dir,
             "save_dir": save_dir,
             "test_optimizer": test_optimizer,
             "num_testing_itrs": require(eval_cfg, "num_testing_itrs",
@@ -126,12 +174,42 @@ class ScaleFamilyMethod(L2OMethod):
             # optimizer/cell_cls/cell_size/num_cells select which trained L2O
             # checkpoint to restore, which must match train.
             flags.update(self._optimizer_flags(config))
+            if restore_model_name is not None:
+                flags["restore_model_name"] = restore_model_name
         flags.update(self._problem_flags(config, "eval"))
-        flags.update({k: v for k, v in eval_cfg.items()})
+        flags.update({k: v for k, v in eval_cfg.items()
+                      if k not in _EVAL_CONFIG_ONLY_KEYS})
 
         cmd = run_script(self.lib_dir, "evaluate.py", flags,
                          log_path=os.path.join(output_dir, "eval.log"))
-        return _read_scale_eval(save_dir, cmd)
+        out = _read_scale_eval(save_dir, cmd)
+
+        # Experiment-2 recovery metrics, recomputed from the saved signal with
+        # the shared metric code (see module docstring).
+        recovery_path = os.path.join(save_dir, _LASSO_RECOVERY_FILE)
+        if config.get("problem") == "lasso_dataset" and os.path.exists(recovery_path):
+            lasso_data_dir = require(eval_cfg, "lasso_data_dir",
+                "{} requires config['eval']['lasso_data_dir'] when problem="
+                "'lasso_dataset'".format(self.name))
+            lam = require(eval_cfg, "lasso_lam",
+                "{} requires config['eval']['lasso_lam'] when problem='lasso_dataset' "
+                "-- must match the lambda used to generate the dataset (see "
+                "Benchmarking/data/lasso.py)".format(self.name))
+            num_fista_iters = require(eval_cfg, "num_fista_iters",
+                "{} requires config['eval']['num_fista_iters'] when "
+                "problem='lasso_dataset'".format(self.name))
+            rec = np.load(recovery_path)
+            # Instances fingerprint (see adapters/dm_rnnprop.py for the note).
+            out.metrics[FINGERPRINT_KEY] = fingerprint_arrays(
+                b=rec["b"], x_true=rec["x_true"],
+                x0=rec["x0"] if "x0" in rec.files else None)
+            a = np.load(os.path.join(lasso_data_dir, "A.npy")).astype(np.float32)
+            out.metrics.update(evaluate_lasso_recovery(
+                a, rec["b"], rec["x_true"], rec["x_pred"], lam,
+                num_fista_iters=num_fista_iters,
+                xstar_cache_dir=eval_cfg.get("xstar_cache_dir")).to_dict())
+            out.artifacts["recovery"] = recovery_path
+        return out
 
     def run_classical_optimizer_eval(self, config: Dict[str, Any], classical: str,
                           output_dir: str) -> EvalOutput:
