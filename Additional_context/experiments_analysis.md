@@ -932,6 +932,52 @@ rows ~482-509 (recorded in that run's `RESULTS_STATUS.md`).
 `--methods`), then seeds 22-30 if held-out R_f holds up; add a Scale column
 to the Exp 2 tables/figures and the compute-matched view.
 
+### 2026-09-17 -- Model-based per-layer trajectories were running means across test files (all sweeps); regenerated from checkpoints
+
+Found while building the in-process re-implementation (`Benchmarking/unified`,
+branch `unified-slice`) and checking it against the stored try3 LISTA
+evaluation: the unified per-layer trajectory for `test_sparsity_0.10` started
+at f(x0) = 14.962 (the same number RNNProp's stored trajectory starts at on that
+split) while the stored `lasso_layer0` was 8.4866. `x_pred` matched the stored
+`final_output.npy`, so the iterates were identical -- only the metric differed.
+
+**Mechanism.** `Model_Base_L2O/train.py` `--test` builds its 16 `lasso_layer{i}`
+Keras `Mean` metrics once and reuses them across the `compile()`/`evaluate()` of
+each test file; under Keras 3 their totals are never reset, so the value stored
+for the k-th file is the running mean over files 1..k. Confirmed three ways: the
+running means of the true per-file f(x0) reproduce the stored values to 4
+decimals on try3 (`2.9461, 5.2488, 8.4866, 10.5895 ...`) and on exp2_real seed 0
+(`3.0048, 5.2929, 8.5769 ...`); reproduced locally on CPU with two different
+files; and the stored values de-accumulate exactly (`f_k = k*s_k - (k-1)*s_{k-1}`)
+onto the unified trajectories for all 11 try3 files (now a pytest,
+`tests/test_unified_parity.py::test_real_unrolled_checkpoint_parity`).
+Original 2021 toolbox code; present in every sweep from exp2_real onward.
+
+**Scope.** Wrong: model-based `final_loss`/`min_loss`/`mean_loss` and raw
+`lasso_layer{i}` for every test sparsity after the first (0.02), all sweeps.
+Because files run in increasing sparsity order, harder files were dragged down
+(0.40 final layer ~ half its true value). Correct: the four Table-4 recovery
+metrics (from `final_output.npy`), all model-free rows, the compute-matched
+comparison (reads `modified_relative_loss`). So the RQ2a/claim-3 artifacts and
+tables built on the recovery metrics stand; anything that plotted a
+model-based per-layer curve or quoted a model-based `final_loss` does not.
+
+**Fix + regeneration.** `train.py` builds fresh metrics per file (verified on
+the try3 checkpoint: `2.9461, 7.5514, 14.9623`). No retraining needed:
+`Benchmarking/regenerate_modelbased_trajectories.py --run runs/<run>` re-evaluates
+every model-based checkpoint with `unified-lista`/`unified-alista` on CPU,
+cross-checks per cell (x_pred per row vs `final_output.npy`, de-accumulation),
+and writes `all_test_metrics_perfile.json` next to each stored file plus
+`<run>/results_modelbased_trajectories_fixed.jsonl`; originals untouched.
+Run for exp2_try2_curve, exp2_try3_210x300, exp2_try2, exp2_real,
+exp2_try2_moredata (2026-09-17). Recorded in `RESULTS_VALIDITY.md` and each
+run's `RESULTS_STATUS.md`.
+
+**Side result of the same check:** on CPU the unified RNNProp evaluation is
+bit-identical to the library script's (0.0 difference over 1000 steps x 1280
+instances); the stored GPU files differ from both by up to 8e-3 in x_pred
+(float32 GPU/CPU drift), 1e-5 in the trajectory.
+
 ### Open questions / next steps (Experiment 2)
 - Primer discrepancy, now sharper (see 2026-09-14 citation entry): the Primer
   says RNNProp is faster than ISTA / comparable to FISTA at (25,50); ours is
