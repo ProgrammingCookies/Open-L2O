@@ -178,3 +178,36 @@ at p=0.02 unchanged (0.0247), p=0.10 0.0698 -> 0.1232, p=0.40 0.2552 -> 0.5175;
 the fix hold per-file values already; the script recognises both forms
 (`stored_form` in the provenance json), so **re-run it after a sweep resumes**
 (e.g. try3 seeds 26-30) -- it skips cells it has already done.
+
+## 2026-09-18: L2O-Scale evaluation is not reproducible run-to-run (allocator-dependent)
+
+**Affects:** every `l2o-scale` *evaluation* (`evaluate.py --include_lasso_problems`), i.e.
+the `exp2_try2_scale_*` runs and the `exp2_try2_scale` sweep in progress. Training is not
+affected (it uses the functional update path with explicit state).
+
+**Mechanism** (found while porting Scale into `Benchmarking/unified`): for each chunk,
+`evaluate.py:223-246` builds the optimizer, runs a dummy `apply_gradients` on a throw-away
+`tf.Variable` (to create the lazily built weights) and loads the checkpoint; the chunk is then
+run on a *new* `tf.Variable`. `TrainableOptimizer` keys its per-variable state by
+`id(variable)` (`optimizer/trainable_optimizer.py:185-193`). When CPython reuses the freed
+dummy's address for the new variable -- observed in **2 of 10 chunks** of one 1280-row split,
+different chunks in different processes -- the real run silently inherits the dummy's
+post-step state (log learning rates, gradient accumulators, hidden state) instead of a
+fresh one. Two runs of the script with the same seed then differ: measured 6.5e-2 on
+trajectory values of ~2.4 (~3 %) from step 1 on `exp2_try2_scale_narrow`'s checkpoint.
+
+**Consequence:** Scale evaluation numbers carry an unseeded random component of that
+order; same-seed reruns are not guaranteed to reproduce them. The four Table-4 metrics
+are computed from `x_pred`, which is affected the same way. The intended behaviour
+(a fresh state for the real variable) is what happens in the majority of chunks and
+what the unified implementation (`unified-scale`, deterministic) does.
+
+**Fix (applied 2026-09-18, `L2O-Scale/evaluate.py` `make_test_optimizer`):** the dummy
+variable's slot is dropped after `opt.load(checkpoint_path)`, so the real variable always
+starts fresh. Verified: three same-seed runs on `exp2_try2_scale_narrow`'s checkpoint are
+now identical and equal to `unified-scale` bit for bit. Scale cells evaluated **before** the
+fix (`exp2_try2_scale*`) should be re-evaluated (evaluation only -- the checkpoints are
+valid) before their numbers are used; `unified-scale` gives the same numbers as the fixed
+script and needs no subprocess. `tests/test_unified_parity.py` asserts Scale parity per chunk
+(each chunk's script output must be bit-identical to the fresh or the inherited-slot variant
+of the unified policy), which is also how the mechanism was pinned down.
