@@ -45,6 +45,7 @@ class SplitResult:
     trajectory: List[float]
     x_pred: np.ndarray
     batches: List[Batch] = field(default_factory=list)   # in walk order
+    chunk_trajectories: List[List[float]] = field(default_factory=list)   # per chunk, "batch_mean"/"concat" only
 
 
 def evaluate_split(make_solver: Callable[[], IterativeSolver], problem: Problem, num_steps: int,
@@ -57,6 +58,7 @@ def evaluate_split(make_solver: Callable[[], IterativeSolver], problem: Problem,
 
     sum_costs = np.zeros(num_steps, dtype=np.float64)
     concat: List[float] = []
+    chunk_trajectories: List[List[float]] = []
     sum_per_sample = [tf.zeros((), tf.float32) for _ in range(num_steps)]
     count = tf.zeros((), tf.float32)
     x_pred_chunks, batches = [], []
@@ -80,8 +82,10 @@ def evaluate_split(make_solver: Callable[[], IterativeSolver], problem: Problem,
             raise RuntimeError("solver yielded fewer than num_steps + 1 iterates")
         if reduction == "batch_mean":
             sum_costs += np.array(costs, dtype=np.float64)
+            chunk_trajectories.append(list(costs))
         elif reduction == "concat":
             concat.extend(costs)
+            chunk_trajectories.append(list(costs))
         else:
             count = count + tf.cast(tf.shape(batch.x0)[0], tf.float32)
         x_pred_chunks.append(np.asarray(x_final))
@@ -94,7 +98,8 @@ def evaluate_split(make_solver: Callable[[], IterativeSolver], problem: Problem,
     else:
         trajectory = [float(s / count) for s in sum_per_sample]
     return SplitResult(label=label, trajectory=trajectory,
-                       x_pred=np.concatenate(x_pred_chunks, axis=0), batches=batches)
+                       x_pred=np.concatenate(x_pred_chunks, axis=0), batches=batches,
+                       chunk_trajectories=chunk_trajectories)
 
 
 def split_metrics(result: SplitResult, problem: Problem, eval_section: Dict) -> Dict:

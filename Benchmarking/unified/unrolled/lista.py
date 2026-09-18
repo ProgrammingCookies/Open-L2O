@@ -277,19 +277,36 @@ class Alista(keras.Sequential):
 
 # ------------------------------------------------------------------- unified glue
 
+MODELS = {}   # model_name -> factory(a, num_layers, model_lam, w_alista, ss_q_per_layer, ss_maxq, share_W, ident)
+
+
+def _lista(a, num_layers, model_lam, w_alista, ss_q_per_layer, ss_maxq, share_W, ident):
+    return Lista(a, num_layers, model_lam, share_W, None, name="Lista")
+
+
+def _alista(a, num_layers, model_lam, w_alista, ss_q_per_layer, ss_maxq, share_W, ident):
+    if w_alista is None:
+        raise ValueError("alista needs W.npy next to A.npy (data/lasso.py compute_alista_w=True)")
+    return Alista(a, w_alista, num_layers, model_lam, ss_q_per_layer, ss_maxq, None, name="Alista")
+
+
+def _lfista(a, num_layers, model_lam, w_alista, ss_q_per_layer, ss_maxq, share_W, ident):
+    from unified.unrolled.lfista import Lfista
+    return Lfista(a, num_layers, model_lam, share_W, x0_at_layer0=bool(ident.get("x0_at_layer0", False)),
+                  name="Lfista")
+
+
+MODELS.update({"lista": _lista, "alista": _alista, "lfista": _lfista})
+
+
 def build_model(model_name: str, a: np.ndarray, num_layers: int, model_lam: float,
                 w_alista=None, ss_q_per_layer: float = 1.2, ss_maxq: float = 13.0,
-                share_W: bool = False, create_cells: bool = True):
+                share_W: bool = False, create_cells: bool = True, ident=None):
     """The model exactly as ``Model_Base_L2O/train.py`` constructs it; with every
     cell created (evaluation) or none (the curriculum adds them layer by layer)."""
-    if model_name == "lista":
-        model = Lista(a, num_layers, model_lam, share_W, None, name="Lista")
-    elif model_name == "alista":
-        if w_alista is None:
-            raise ValueError("alista needs W.npy next to A.npy (data/lasso.py compute_alista_w=True)")
-        model = Alista(a, w_alista, num_layers, model_lam, ss_q_per_layer, ss_maxq, None, name="Alista")
-    else:
-        raise ValueError("unified unrolled models: 'lista' or 'alista', got {!r}".format(model_name))
+    if model_name not in MODELS:
+        raise ValueError("unified unrolled models: one of {}, got {!r}".format(sorted(MODELS), model_name))
+    model = MODELS[model_name](a, num_layers, model_lam, w_alista, ss_q_per_layer, ss_maxq, share_W, ident or {})
     if create_cells:
         for layer_id in range(num_layers):
             model.create_cell(layer_id)

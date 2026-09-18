@@ -87,7 +87,10 @@ class NetPolicy(OptimizerPolicy):
 class PolicySpec:
     """Everything the framework needs to register a learned optimizer."""
     name: str                                          # e.g. "unified-rnnprop"
-    make_policy: Callable[[Dict[str, Any]], OptimizerPolicy]   # from the train/eval section
+    #: (section, checkpoint) -> policy. ``checkpoint`` is only given when the
+    #: policy is rebuilt per evaluation chunk (``fresh_policy_per_chunk``) and
+    #: must load itself; the default policies ignore it and are restored once.
+    make_policy: Callable[..., OptimizerPolicy]
     #: method-level config keys (the problem dialect contributes its own)
     train_schema: ConfigSchema = ConfigSchema()
     eval_schema: ConfigSchema = ConfigSchema()
@@ -95,6 +98,18 @@ class PolicySpec:
     train_defaults: Dict[str, Any] = field(default_factory=dict)
     #: tag used in artifact file names for the learned path ("L2L" in the DM/RNNProp scripts)
     learned_tag: str = "L2L"
+    #: the library script's own vocabulary for the two evaluation essentials
+    eval_optimizer_key: str = "optimizer"     # L2O-Scale: "test_optimizer"
+    eval_steps_key: str = "num_steps"         # L2O-Scale: "num_testing_itrs"
+    #: ``eval.<eval_optimizer_key>`` value -> factory(section) for the classical baselines
+    classical: Dict[str, Callable[[Dict[str, Any]], OptimizerPolicy]] = field(default_factory=dict)
+    #: True when the library script rebuilds (and reloads) the optimizer for every
+    #: evaluation chunk (L2O-Scale); False = one policy, restored once on the first batch
+    fresh_policy_per_chunk: bool = False
+    #: which library's artifact/checkpoint file layout the problem hooks reproduce
+    artifact_layout: str = "dm"
+    #: which training loop shape ``train()`` runs: "dm" (meta_train) or "scale" (scale_train)
+    train_loop: str = "dm"
 
 
 # Keys of train_{dm,rnnprop}.py that belong to the method (problem keys live in the dialects).

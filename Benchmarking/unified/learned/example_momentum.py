@@ -15,7 +15,8 @@ The recipe:
 2. An ``OptimizerPolicy`` subclass with ``initial_state`` / ``step``. The
    policy owns its state layout; the loop only threads it through.
 3. A ``PolicySpec``: the method name, ``make_policy`` (TF imported inside),
-   the config keys the method accepts, and the training-loop defaults.
+   the config keys the method accepts, the training-loop defaults and which
+   classical baselines its ``eval.optimizer`` may name.
 4. (In ``unified/__init__.py``) one line in ``METHODS``.
 
 Everything else -- meta-training, evaluation on every registered problem,
@@ -25,6 +26,7 @@ tests -- comes from the framework.
 
 from __future__ import annotations
 
+from unified.learned.classical import DM_SCRIPT_CLASSICAL
 from unified.policy import MODEL_FREE_EVAL_SCHEMA, MODEL_FREE_TRAIN_SCHEMA, NetPolicy, PolicySpec
 from unified.schema import ConfigSchema
 
@@ -69,4 +71,5 @@ EXAMPLE_SPEC = PolicySpec(
     train_schema=MODEL_FREE_TRAIN_SCHEMA.merge(ConfigSchema.of(defaults={"init_log_lr": -3.0, "init_momentum": 0.0})),
     eval_schema=MODEL_FREE_EVAL_SCHEMA.merge(ConfigSchema.of(defaults={"init_log_lr": -3.0, "init_momentum": 0.0})),
     train_defaults={"evaluation_period": 10},
+    classical=DM_SCRIPT_CLASSICAL,    # the Adam baseline the DM/RNNProp scripts provide
 )

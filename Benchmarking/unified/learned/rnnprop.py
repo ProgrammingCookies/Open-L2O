@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from unified.policy import (MODEL_FREE_EVAL_SCHEMA, MODEL_FREE_TRAIN_SCHEMA, NetPolicy,
                             PolicySpec)
+from unified.learned.classical import DM_SCRIPT_CLASSICAL
 from unified.schema import ConfigSchema
 
 
@@ -48,6 +49,7 @@ class RNNPropPolicy(NetPolicy):
 _BETAS = ConfigSchema.of(defaults={"beta1": 0.95, "beta2": 0.95})
 
 RNNPROP_SPEC = PolicySpec(
+    classical=DM_SCRIPT_CLASSICAL,
     name="unified-rnnprop",
     make_policy=lambda section: RNNPropPolicy(beta1=float(section["beta1"]), beta2=float(section["beta2"])),
     # --last_step_loss and --lasso_x0_mode exist only in the RNNProp scripts

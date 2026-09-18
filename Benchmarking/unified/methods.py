@@ -85,6 +85,10 @@ class UnifiedModelFreeMethod(L2OMethod):
             if k not in config.get("train", {}):
                 tr[k] = v
         cfg = {**config, "train": tr}
+        if self.spec.train_loop == "scale":
+            return self._train_scale(cfg, tr, dialect, output_dir)
+        if self.spec.train_loop != "dm":
+            raise ValueError("{}: unknown train_loop {!r}".format(self.name, self.spec.train_loop))
 
         spec = MetaTrainSpec(
             num_epochs=int(tr["num_epochs"]), num_steps=int(tr["num_steps"]),
@@ -114,51 +118,101 @@ class UnifiedModelFreeMethod(L2OMethod):
                      "saved_epochs": result.saved_epochs, "final_training_loss": result.epoch_losses[-1]},
             artifacts=artifacts, command="in-process {}".format(self.name))
 
+    def _train_scale(self, cfg, tr, dialect, output_dir: str) -> TrainOutput:
+        """L2O-Scale's loop shape (metaopt.train_optimizer); checkpoint layout of adapters/scale_family.py."""
+        from unified.learned.scale import checkpoint_dir
+        from unified.meta_train import ScaleTrainSpec, scale_train
+
+        select = tr["select_checkpoint"]
+        if select not in ("final", "best"):
+            raise ValueError("{}: config['train']['select_checkpoint'] must be 'final' or 'best', "
+                             "got {!r}".format(self.name, select))
+        spec = ScaleTrainSpec(
+            num_problems=int(tr["num_problems"]), num_meta_iterations=int(tr["num_meta_iterations"]),
+            fix_num_steps=int(tr["fix_num_steps"]), fix_unroll_length=int(tr["fix_unroll_length"]),
+            fix_num_steps_eval=int(tr["fix_num_steps_eval"]),
+            evaluation_period=int(tr["evaluation_period"]), evaluation_epochs=int(tr["evaluation_epochs"]),
+            save_period=int(tr["save_period"]), learning_rate=float(tr["meta_learning_rate"]),
+            gradient_clip=float(tr["gradient_clip_level"]))
+        if not tr.get("fix_unroll", True):
+            raise NotImplementedError("{}: only --fix_unroll training is ported (random unroll "
+                                      "lengths are not)".format(self.name))
+        logdir = checkpoint_dir(output_dir)
+        log = _LogFile(os.path.join(output_dir, "train.log"),
+                       "# in-process {} train: {}".format(self.name, json.dumps(tr, sort_keys=True, default=str)))
+        try:
+            _seed_everything(cfg.get("seed"))
+            problem = dialect.train_problem(cfg)
+            policy = self.spec.make_policy(tr)
+            spec.log = log
+            result = scale_train(policy, problem, spec, logdir)
+        finally:
+            log.close()
+        ckpt = os.path.join(logdir, "model-{}.l2o".format(select))
+        if not os.path.exists(ckpt):
+            raise FileNotFoundError("{}: select_checkpoint={!r} but {} was not written (model-best.l2o "
+                                    "needs an evaluation: evaluation_period must divide "
+                                    "num_meta_iterations)".format(self.name, select, ckpt))
+        artifacts = {"train_log": log.path}
+        if os.path.exists(os.path.join(logdir, "recovery.npz")):
+            artifacts["recovery"] = os.path.join(logdir, "recovery.npz")
+        return TrainOutput(checkpoint=ckpt,
+                           metrics={"logdir": logdir, "best_evaluation": result.best_evaluation},
+                           artifacts=artifacts, command="in-process {}".format(self.name))
+
     # ---------------------------------------------------------------- evaluate
 
     def evaluate(self, config: Dict[str, Any], checkpoint: Optional[str],
                  output_dir: str) -> EvalOutput:
         import tensorflow as tf
         from unified.evalwalk import evaluate_split, to_eval_output
-        from unified.learned.classical import CLASSICAL
         from unified.solver import PolicySolver
 
+        spec = self.spec
         dialect = self._dialect(config)
-        schema = self.spec.eval_schema.merge(dialect.eval_schema)
+        schema = spec.eval_schema.merge(dialect.eval_schema)
         ev = schema.validate(config.get("eval", {}), "{}.evaluate config['eval']".format(self.name))
         cfg = {**config, "eval": ev}
-        opt = ev["optimizer"]
-        num_steps = int(ev["num_steps"])
+        opt = ev[spec.eval_optimizer_key]
+        num_steps = int(ev[spec.eval_steps_key])
         output_path = os.path.join(os.path.abspath(output_dir), "eval")
+        seed = config.get("seed")
 
-        _seed_everything(config.get("seed"))
+        _seed_everything(seed)
         labelled = dialect.eval_problems(cfg)
 
-        if opt == "L2L":
-            # One network for the whole walk (the scripts build it once, before
-            # the chunk loop); the solver re-initialises its state per chunk.
-            policy = self.spec.make_policy(ev)
+        on_first_batch = None
+        if opt == spec.learned_tag:
             if checkpoint is None:
-                logging.warning("Evaluating untrained L2L optimizer test")
+                logging.warning("Evaluating untrained %s optimizer", spec.learned_tag)
+            if spec.fresh_policy_per_chunk:
+                # The library script rebuilds and reloads the optimizer for
+                # every chunk (L2O-Scale); the policy does the preamble itself.
+                def make_policy():
+                    return spec.make_policy(ev, checkpoint)
+            else:
+                # One network for the whole walk (the scripts build it once, before
+                # the chunk loop); the solver re-initialises its state per chunk.
+                policy = spec.make_policy(ev)
 
-            def make_policy():
-                return policy
+                def make_policy():
+                    return policy
 
-            def on_first_batch(batch):
-                # Build with a throw-away step, then load -- the scripts' order
-                # (Keras creates weights on the first forward pass).
-                if not policy.trainable_variables:
-                    policy.build(tf.constant(batch.x0))
-                    if checkpoint is not None:
-                        policy.restore(checkpoint, 0)
-            tag = self.spec.learned_tag
-        elif opt in CLASSICAL:
+                def on_first_batch(batch):
+                    # Build with a throw-away step, then load -- the scripts' order
+                    # (Keras creates weights on the first forward pass).
+                    if not policy.trainable_variables:
+                        policy.build(tf.constant(batch.x0))
+                        if checkpoint is not None:
+                            policy.restore(checkpoint, 0)
+            tag = spec.learned_tag
+        elif opt in spec.classical:
             def make_policy():
-                return CLASSICAL[opt](ev)
-            on_first_batch = None
+                return spec.classical[opt](ev)
             tag = opt
         else:
-            raise ValueError("{} is not a valid optimizer (L2L or one of {})".format(opt, sorted(CLASSICAL)))
+            raise ValueError("{} is not a valid {} ({} or one of {})".format(
+                opt, spec.eval_optimizer_key, spec.learned_tag, sorted(spec.classical)))
 
         results, problems, artifacts = [], [], {}
         for label, problem in labelled:
@@ -167,19 +221,20 @@ class UnifiedModelFreeMethod(L2OMethod):
             results.append(result)
             problems.append(problem)
             tag_dir = output_path if len(labelled) == 1 else os.path.join(output_path, os.path.splitext(label)[0])
-            for k, v in problem.write_eval_artifacts(result, tag_dir, tag).items():
+            written = problem.write_eval_artifacts(result, tag_dir, tag, layout=spec.artifact_layout,
+                                                   seed=seed if seed is not None else 0)
+            for k, v in written.items():
                 artifacts[k if len(labelled) == 1 else "{}:{}".format(label, k)] = v
 
         return to_eval_output(results, problems, ev, artifacts, command="in-process {}".format(self.name))
 
     def run_classical_optimizer_eval(self, config: Dict[str, Any], classical: str,
                                      output_dir: str) -> EvalOutput:
-        from unified.learned.classical import CLASSICAL
-        if classical not in CLASSICAL:
+        if classical not in self.spec.classical:
             raise ValueError("{} evaluation harness only supports the classical optimizers {} "
-                             "(got {!r})".format(self.name, sorted(CLASSICAL), classical))
+                             "(got {!r})".format(self.name, sorted(self.spec.classical), classical))
         cfg = dict(config)
-        cfg["eval"] = {**cfg.get("eval", {}), "optimizer": classical}
+        cfg["eval"] = {**cfg.get("eval", {}), self.spec.eval_optimizer_key: classical}
         return self.evaluate(cfg, checkpoint=None, output_dir=output_dir)
 
 

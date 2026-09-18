@@ -13,7 +13,9 @@ unchanged, and a new method or problem is one module plus one line.
 |---|---|---|
 | `unified-dm` | `l2o-dm` | `learned/dm.py` (`DMPolicy` + `DM_SPEC`) |
 | `unified-rnnprop` | `l2o-rnnprop` | `learned/rnnprop.py` |
+| `unified-scale` | `l2o-scale` | `learned/scale.py` (`ScalePolicy`) driving the verbatim `learned/hrnn/` |
 | `unified-lista`, `unified-alista` | `lista`, `alista` | `unrolled/` (`LISTA_SPEC`, `ALISTA_SPEC`) |
+| `unified-lfista` | `Model_Base_L2O/models/lfista.py` (no adapter registers it) | `unrolled/lfista.py` (`LFISTA_SPEC`) -- see "Faithful, not fixed" |
 
 | registered problem (`config["problem"]`) | kind | implementation |
 |---|---|---|
@@ -40,8 +42,10 @@ unified/
   exp2_driver.py  Experiment 2 through the unified methods:  python -m unified.exp2_driver ...
   tasks/          problems:   lasso.py, quadratic.py
   learned/        optimizers: nets_dm.py (verbatim networks), dm.py, rnnprop.py, classical.py,
+                              scale.py + hrnn/ (verbatim L2O-Scale optimizer code),
                               example_momentum.py (the worked example, not registered)
-  unrolled/       LISTA-style: lista.py (verbatim models + UnrolledSolver), loader.py, curriculum.py, specs.py
+  unrolled/       LISTA-style: lista.py (verbatim models + UnrolledSolver + the MODELS registry),
+                              lfista.py, loader.py, curriculum.py, specs.py
 ```
 
 Names were chosen so that no submodule is called `problems`, `networks`,
@@ -75,7 +79,24 @@ test split/file; the first is the headline row), optional `val_problem`.
 The policy owns its state layout (RNNProp keeps its Adam moments in it). Two
 habits keep bit-exactness with the library scripts: create the network lazily
 on the first `step` (Keras draws the initial weights then, in the scripts'
-order), and use `NetPolicy`'s index-keyed pickle checkpoints.
+order), and use `NetPolicy`'s index-keyed pickle checkpoints. A `PolicySpec`
+also declares the script's own evaluation vocabulary (`eval_optimizer_key`,
+`eval_steps_key`, `learned_tag`), its classical baselines, whether the script
+rebuilds the optimizer per evaluation chunk (`fresh_policy_per_chunk`), its
+artifact layout and which training-loop shape it uses (`train_loop`).
+
+`ScalePolicy` (`learned/scale.py`) is the stress test of the protocol: L2O-Scale's
+optimizer updates `tf.Variable`s in place through `id()`-keyed slots, draws
+random numbers at construction, at slot creation and on every step (a dead
+`tf.random.normal` in the library's `Problem.gradients`), and its evaluation
+does a dummy step with the chunk's real gradient before loading. The policy
+runs that preamble inside its first `step`, replicates the dead draws
+(`rng_compat`), and owns the variable the way `ClassicalPolicy` does.
+Training uses the optimizer's functional `_compute_updates` path with
+explicit state through `meta_train.scale_train` -- a second loop *shape*
+(problems x meta-iterations, log-objective meta-loss over the script's
+(L+1)-entry window list, RMSprop, per-element clipping, state carried through
+validation) that shares the problem and policy protocols with `meta_train`.
 
 **`ModelSpec`** (`model.py`) — an unrolled network (layer k = iterate x_k):
 `build(problem, identity, create_cells)`, `load_checkpoint`, `train`,
@@ -84,6 +105,12 @@ phases so an evaluation can never use a different architecture than was trained.
 
 Both method kinds implement `IterativeSolver.iterate(batch, T) -> x_0 … x_T`;
 `evalwalk.evaluate_split` is the only evaluation loop.
+
+`unrolled/lfista.py` is the second unrolled family: a cell reads *two* previous
+iterates from the tape and all layers share one tied `We`. It goes through the
+unchanged curriculum, loader and `UnrolledSolver`; the loader finds the tied
+`We` under its attribute path and explicitly skips a variable no cell uses
+(the library's layer 1 has no momentum term).
 
 ## Adding a learned optimizer
 
@@ -145,6 +172,30 @@ training procedure, and a `ModelSpec` in a TF-free module
 * **`quadratic`**: the Adam baseline and a tiny adapter-trained DM/RNNProp
   checkpoint evaluate bit-identically through both paths, for 1 and 3
   library-generated batches.
+* **L2O-Scale**: on the tiny fixture, evaluation of an adapter-trained checkpoint,
+  the Adam/SGD/Adagrad baselines and a same-seed training run
+  (`num_problems=2 x num_meta_iterations=2`: every `model-*.l2o`, `recovery.npz`,
+  every logged validation cost) are **bit-identical** to `L2O-Scale/{evaluate,train}.py`;
+  the real `exp2_try2_scale_narrow` checkpoint matches an adapter CPU replay
+  bit-for-bit, chunk by chunk (100-step prefix) -- see the next paragraph for
+  why "chunk by chunk".
+* **LFISTA**: the library's untrained forward pass (its weights never train,
+  see below) is reproduced bit-exactly per layer, computed in a `Model_Base_L2O`
+  subprocess; the trained checkpoint round-trips through the loader.
+
+**A reproducibility defect the Scale port exposed (fixed 2026-09-18).**
+`L2O-Scale/evaluate.py` built the optimizer for each chunk with a dummy
+`apply_gradients` on a throw-away variable, then evaluated on a new variable.
+The optimizer keys its per-variable state by `id(variable)`; when CPython
+handed the new variable the freed dummy's address (observed in 2 of 10 chunks
+of a 1280-row split), the real run silently started from the dummy's post-step
+state instead of a fresh one, so two same-seed runs of the script differed
+(~3 % from step 1 in the affected chunks). The unified policy keeps the dummy
+referenced so this cannot happen (`dummy_slot="fresh"`); the library script
+now drops the dummy's slot. Both behaviours are implemented
+(`dummy_slot="fresh" | "inherit"`) and the parity tests check per chunk which
+one the script exhibited before asserting full bit-identity, so a regression
+would be diagnosed. Recorded in `RESULTS_VALIDITY.md`.
 * **Fairness**: `tests/fairness_matrix.py` entries `lasso_tiny_unified` and
   `quadratic` prove the unified methods score the very same instances as the
   adapter-backed reference.
@@ -162,6 +213,15 @@ Reproduced for parity, documented here, switchable only explicitly:
 * Model-free LASSO chunk averaging is a plain mean over `ceil(N/batch)` chunks
   (the last, smaller chunk weighs the same as the others), as in the scripts.
 
+* `unrolled/lfista.py` deviates from `Model_Base_L2O/models/lfista.py` in two
+  documented ways, both identity keys of the model: its weights are
+  `keras.Variable`s (the library's `tf.Variable`s are never tracked, trained or
+  saved under Keras 3 -- the defect `2b2264c` fixed for lista/alista only), and
+  `x0_at_layer0` chooses between the library's start from `x = 0` (`False`, the
+  parity target) and consuming the seeded `x0` through a fixed `(I-BA)` term
+  like LISTA (`True`, the platform's start-point fairness; the fairness matrix
+  uses it).
+
 Deliberate deviations (stricter than the scripts): a missing checkpoint
 **raises** instead of silently evaluating an untrained optimizer; unknown
 config keys raise; the unported training flags (`if_cl`, `if_mt`, `if_scale`,
@@ -176,15 +236,8 @@ means across test files (see `RESULTS_VALIDITY.md`, 2026-09-17). The unified
 evaluator is what `regenerate_modelbased_trajectories.py` uses to recompute
 them from the existing checkpoints without retraining.
 
-## Not in the framework yet
+## Not in the framework
 
-* **L2O-Scale** (`unified-scale`): its `optimizer/*.py` are byte-identical
-  across Scale/Entropy and would be copied verbatim under `learned/hrnn/`; a
-  `ScalePolicy` would own a `tf.Variable` the way `ClassicalAdamPolicy` does
-  (Scale's `apply_gradients` needs `id()`-keyed slots on real Variables); its
-  evaluation surface has RNG-consuming quirks (a dummy `apply_gradients`
-  before loading, a dead `tf.random.normal` per step) that bit-exact parity
-  would have to replicate; its training loop needs a `"scale_log"` meta-loss
-  (`mean log(f_t/f_0)`), RMSprop and per-element clipping — all expressible as
-  `MetaTrainSpec` options.
-* Swarm / Entropy / Jacobian stay adapter-only.
+Swarm / Entropy / Jacobian stay adapter-only. Entropy and Jacobian are forks of
+the Scale code now under `learned/hrnn/`; their regularizers and sparse-update
+mask would be further `ScalePolicy` options.

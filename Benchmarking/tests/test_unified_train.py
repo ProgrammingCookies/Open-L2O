@@ -111,6 +111,48 @@ _UNROLLED_TINY = {"num_layers": 2, "epochs": 2, "patience": 1, "base_lr": 5e-4, 
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("x0_at_layer0", [False, True], ids=["faithful", "x0"])
+def test_lfista_curriculum_and_loader_roundtrip(x0_at_layer0, fixture_root, tmp_path):
+    """The second unrolled family goes through the UNCHANGED curriculum, loader
+    and solver: it trains (val_lasso finite), its layer-wise checkpoint reloads
+    into a fresh model with an identical per-layer trajectory, and the tied
+    ``_We`` is found under ``model/_We`` (a bare attribute), Wg/Wm/theta under
+    the optimizer's variable list."""
+    from unified.tasks.lasso import LassoProblem
+    from unified.unrolled.lista import UnrolledSolver, build_model
+    from unified.unrolled.loader import load_layerwise_checkpoint
+    fixture = make_lasso_tiny(fixture_root, 7)
+    uni = get_method("unified-lfista")
+    train = {"data_dir": fixture.parts["width_dir"], "lasso_lam": fixture.parts["lam"],
+             "model_lam": fixture.parts["lam"], "x0_at_layer0": x0_at_layer0, **_UNROLLED_TINY}
+    run_name = "lfista__tiny__s7"
+    cfg = {"method": uni.name, "problem": "lasso", "seed": 7, "run_name": run_name, "train": train}
+    t_out = uni.train(cfg, os.path.join(str(tmp_path), "train"))
+    assert len(t_out.metrics["layers"]) == 2 and np.isfinite(t_out.metrics["final_val_lasso"])
+
+    ev = {"data_dir": fixture.parts["width_dir"], "test_files": [fixture.parts["test_file"]],
+          "num_fista_iters": _FISTA_ITERS, "xstar_cache_dir": os.path.join(fixture.root, "xstar_cache")}
+    e_out = uni.evaluate({**cfg, "eval": ev}, t_out.checkpoint, os.path.join(str(tmp_path), "eval"))
+    assert len(e_out.trajectory) == 2 and "nmse_vs_true_mean" in e_out.metrics
+    import json
+    keys = json.loads(e_out.artifacts["checkpoint_keys"])
+    assert keys["Lfista_We1"] == "model/_We/.ATTRIBUTES/VARIABLE_VALUE"
+    assert all(v.startswith("model/optimizer/_trainable_variables/") for k, v in keys.items() if k != "Lfista_We1")
+    # In the library's faithful mode layer 1 has no Wm term, so Wm2 is used by no
+    # cell, never reaches Keras' optimizer list and is (explicitly) not loaded.
+    expected = {"Lfista_Wg", "Lfista_th", "Lfista_We"} | ({"Lfista_Wm"} if x0_at_layer0 else set())
+    assert {k[:9] for k in keys} == expected
+
+    # fresh model + loader == the evaluated model, layer by layer
+    problem = LassoProblem(fixture.parts["width_dir"], fixture.parts["test_file"], lam=fixture.parts["lam"], batch_size=1024)
+    fresh = build_model("lfista", problem.a, 2, fixture.parts["lam"], ident={"x0_at_layer0": x0_at_layer0})
+    load_layerwise_checkpoint(fresh, t_out.metrics["model_dir"], 2)
+    batch = next(problem.walk())
+    traj = [float(problem.objective(x, batch)) for x in list(UnrolledSolver(fresh).iterate(batch, 2))[:2]]
+    assert np.allclose(traj, e_out.trajectory, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.slow
 @pytest.mark.parametrize("model_name", ["lista", "alista"])
 def test_unified_curriculum_checkpoint_loads_in_adapter(model_name, fixture_root, tmp_path):
     """Unified layer-wise training writes the library's checkpoint layout AND
@@ -155,3 +197,34 @@ def test_unported_flags_raise(fixture_root, tmp_path):
     with pytest.raises(NotImplementedError, match="if_cl"):
         get_method("unified-dm").train({"method": "unified-dm", "problem": "lasso_dataset", "seed": 7,
                                         "train": train}, str(tmp_path))
+
+
+@pytest.mark.slow
+def test_scale_same_seed_training_is_bit_identical(fixture_root, tmp_path):
+    """L2O-Scale's loop shape (problems x meta-iterations, log-objective
+    meta-loss, RMSprop + per-element clipping, state carried through
+    validation, numpy reseed per problem, x0 redrawn per trajectory): every
+    checkpoint file, the recovery and every logged validation cost identical."""
+    import dill
+    from tests.test_unified_parity import _scale_train_section
+    fixture = make_lasso_tiny(fixture_root, 7)
+    outs = {}
+    for name in ("l2o-scale", "unified-scale"):
+        cfg = {"method": name, "problem": "lasso_dataset", "seed": 7, "train": _scale_train_section(fixture)}
+        outs[name] = get_method(name).train(cfg, os.path.join(str(tmp_path), name))
+    a_dir, u_dir = (os.path.dirname(outs[n].checkpoint) for n in ("l2o-scale", "unified-scale"))
+    for f in ("model-best.l2o", "model-final.l2o", "model-iter1.l2o", "model-iter2.l2o"):
+        with open(os.path.join(a_dir, f), "rb") as fa, open(os.path.join(u_dir, f), "rb") as fu:
+            wa, wu = dill.load(fa), dill.load(fu)
+        assert list(wa) == list(wu) and len(wa) == 31, f
+        for k in wa:
+            assert np.array_equal(wa[k], wu[k]), "{}: tensor {} differs".format(f, k)
+    ra, ru = np.load(os.path.join(a_dir, "recovery.npz")), np.load(os.path.join(u_dir, "recovery.npz"))
+    assert ra.files == ru.files == ["x_pred", "x_true", "b"]
+    assert np.array_equal(ra["x_pred"], ru["x_pred"])
+
+    def costs(path):
+        with open(path, errors="replace") as f:
+            return [l.strip() for l in f if l.startswith("evaluation ")]
+    assert costs(outs["l2o-scale"].artifacts["train_log"]) == costs(outs["unified-scale"].artifacts["train_log"])
+    assert len(costs(outs["unified-scale"].artifacts["train_log"])) == 4

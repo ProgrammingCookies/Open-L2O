@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from unified.policy import (MODEL_FREE_EVAL_SCHEMA, MODEL_FREE_TRAIN_SCHEMA, NetPolicy,
                             PolicySpec)
+from unified.learned.classical import DM_SCRIPT_CLASSICAL
 from unified.schema import ConfigSchema
 
 
@@ -35,6 +36,7 @@ class DMPolicy(NetPolicy):
 _RNNPROP_ONLY = ("beta1", "beta2", "last_step_loss", "lasso_x0_mode")
 
 DM_SPEC = PolicySpec(
+    classical=DM_SCRIPT_CLASSICAL,
     name="unified-dm",
     make_policy=lambda section: DMPolicy(),
     train_schema=MODEL_FREE_TRAIN_SCHEMA.merge(ConfigSchema.of(forbidden=_RNNPROP_ONLY)),

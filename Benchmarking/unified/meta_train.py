@@ -160,3 +160,157 @@ def meta_train(policy: OptimizerPolicy, problem: Problem, spec: MetaTrainSpec,
                     spec.log("Saving optimizer of epoch {}...".format(e + 1))
     result.best_evaluation = best_evaluation
     return result
+
+
+
+# ============================================================================
+# The L2O-Scale loop shape (metaopt.train_optimizer / _validate,
+# trainable_optimizer.partial_unroll / scale_objective), ported so a same-seed
+# run is bit-identical to train.py. Differences from ``meta_train`` above are
+# not cosmetic, which is why it is a second function rather than more flags:
+#   * problems x meta-iterations instead of epochs; rows are drawn per problem
+#     (with the script's numpy-reseed quirk) and x0 per trajectory;
+#   * the meta-loss is mean(log(objs / (f0 + eps) + eps)) over a window's L+1
+#     objective values -- [f(x_s), f(x_s), f(x_{s+1}), ..., f(x_{s+L-1})]: the
+#     segment-start value is listed twice and the post-step value is absent;
+#   * the objective is computed twice per step exactly as the script does (once
+#     for the meta-loss, once inside the inner tape for the gradient), because
+#     with second derivatives on the two autodiff graphs differ in op order;
+#   * policy state is explicit and persistent: reset only at k == 0 (inside the
+#     meta tape), carried across segments, meta-iterations AND validation runs
+#     (the script's validate() mutates the live optimizer state);
+#   * RMSprop, per-element clipping of finite-ised gradients, an (empty) L2 term
+#     that still turns missing gradients into zeros;
+#   * checkpoints: model-best.l2o (validation improvement, global across
+#     problems), model-iter<k+1>.l2o (save_period), model-final.l2o (per problem).
+# ============================================================================
+
+@dataclass
+class ScaleTrainSpec:
+    num_problems: int
+    num_meta_iterations: int
+    fix_num_steps: int
+    fix_unroll_length: int
+    fix_num_steps_eval: int
+    evaluation_period: int
+    evaluation_epochs: int
+    save_period: int
+    learning_rate: float = 1e-6          # RMSprop(learning_rate, rho=0.9, epsilon=1e-20)
+    gradient_clip: float = 1e4           # per-element clip_by_value after make_finite
+    second_derivatives: bool = True
+    rms_decay: float = 0.9
+    rms_epsilon: float = 1e-20
+    l2_reg: float = 0.0
+    obj_scale_eps: float = 1e-6
+    log: Callable[[str], None] = field(default=print)
+
+
+def scale_segment(policy, problem, x, batch, state, len_unroll: int, f0, spec: ScaleTrainSpec,
+                  obj_weights):
+    """One ``partial_unroll``: returns (scaled meta objective, per-step objectives, x, state)."""
+    import tensorflow as tf
+    objectives = [problem.objective(x, batch)]
+    obj_accum = tf.constant(0., dtype=tf.float32)
+    for itr in range(len_unroll):
+        obj = problem.objective(x, batch)                       # full-batch, for the meta-loss
+        with tf.GradientTape() as inner_tape:                   # mini-batch, for the update
+            inner_tape.watch(x)
+            current_obj = problem.objective(x, batch)
+        grad = inner_tape.gradient(current_obj, x)
+        if not spec.second_derivatives:
+            grad = tf.stop_gradient(grad)
+        objectives.append(obj)
+        obj_accum = obj_accum + obj_weights[itr] * obj
+        x, state = policy.step(x, grad, state, itr + 1)
+        if not bool(tf.math.is_finite(obj_accum)):
+            break
+    scaled = tf.reduce_mean(tf.math.log(tf.stack(objectives) / (f0 + spec.obj_scale_eps) + spec.obj_scale_eps))
+    return scaled, objectives, x, state
+
+
+def _scale_run(policy, problem, batch, state, k: int, num_steps: int, spec: ScaleTrainSpec,
+               meta_opt=None):
+    """One trajectory = ``num_steps // fix_unroll_length`` segments; trains when
+    ``meta_opt`` is given (else it is the script's validate()). Returns
+    (x_final, state, last segment's objectives, batch with the x0 used)."""
+    import tensorflow as tf
+    from unified.learned.hrnn import utils as hrnn_utils
+    num_unrolls = num_steps // spec.fix_unroll_length
+    weights = np.ones(spec.fix_unroll_length) / float(spec.fix_unroll_length)
+    x = f0 = sub_obj = None
+    for unroll_itr in range(num_unrolls):
+        first = unroll_itr == 0
+        if meta_opt is None:                                    # _validate(): no tape, no update
+            if first:
+                batch = problem.redraw_x0(batch)
+                x = tf.constant(batch.x0)
+                f0 = problem.objective(x, batch)
+            if first and k == 0:
+                state = policy.reset_state(x)
+            _, sub_obj, x, state = scale_segment(
+                policy, problem, x, batch, state, spec.fix_unroll_length, f0, spec, weights)
+            continue
+        with tf.GradientTape() as meta_tape:
+            if first:                                           # new_trajectory(): fresh x0, f0
+                batch = problem.redraw_x0(batch)
+                x = tf.constant(batch.x0)
+                f0 = problem.objective(x, batch)
+            if first and k == 0:                                # reset_state(), inside the tape
+                state = policy.reset_state(x)
+            meta_obj, sub_obj, x, state = scale_segment(
+                policy, problem, x, batch, state, spec.fix_unroll_length, f0, spec, weights)
+            meta_params = policy.trainable_variables
+            reg_l2 = spec.l2_reg * sum(tf.reduce_sum(p ** 2) for p in meta_params)
+            total_loss = meta_obj + reg_l2
+        grads = meta_tape.gradient(total_loss, meta_params)
+        clipped = [(tf.clip_by_value(hrnn_utils.make_finite(g, tf.zeros_like(v)),
+                                     -spec.gradient_clip, spec.gradient_clip), v)
+                   for g, v in zip(grads, meta_params) if g is not None]
+        meta_opt.apply_gradients(clipped)
+        if np.any(np.array([float(v) for v in sub_obj]) < 0):
+            raise ValueError("Training problem objectives must be nonnegative.")
+    return x, state, sub_obj, batch
+
+
+def scale_train(policy, problem, spec: ScaleTrainSpec, logdir: Optional[str]) -> MetaTrainResult:
+    import tensorflow as tf
+    if spec.fix_num_steps // spec.fix_unroll_length == 0:
+        raise ValueError("fix_num_steps={} < fix_unroll_length={} runs zero windows".format(
+            spec.fix_num_steps, spec.fix_unroll_length))
+    if logdir is not None:
+        os.makedirs(logdir, exist_ok=True)
+    meta_opt = tf.keras.optimizers.RMSprop(spec.learning_rate, rho=spec.rms_decay, epsilon=spec.rms_epsilon)
+    best_evaluation = float("inf")
+    result = MetaTrainResult(best_evaluation, [], [], [])
+    state = None
+    for problem_itr in range(spec.num_problems):
+        spec.log("problem {}".format(problem_itr))
+        batch = problem.sample_rows(reseed_numpy=True)          # pg.Lasso(): rows, then numpy reseed
+        for k in range(spec.num_meta_iterations):
+            spec.log("meta iteration {}".format(k))
+            x, state, sub_obj, batch = _scale_run(policy, problem, batch, state, k, spec.fix_num_steps,
+                                                  spec, meta_opt=meta_opt)
+            result.epoch_losses.append(float(sub_obj[-1]))
+            if (k + 1) % spec.evaluation_period == 0:
+                cost_total = 0.0
+                for _ in range(spec.evaluation_epochs):
+                    x, state, sub_obj, batch = _scale_run(policy, problem, batch, state, k,
+                                                          spec.fix_num_steps_eval, spec)
+                    cost_total += float(sub_obj[-1])
+                cost = cost_total / spec.evaluation_epochs
+                spec.log("evaluation {}, cost={}".format((k + 1) // spec.evaluation_period, cost))
+                result.eval_history.append({"problem": problem_itr, "meta_iteration": k, "eval_cost": cost})
+                if logdir is not None:
+                    recovery = problem.training_recovery(batch, np.asarray(x), layout="scale")
+                    if recovery is not None:
+                        np.savez(os.path.join(logdir, "recovery.npz"), **recovery)
+                    if cost < best_evaluation:
+                        best_evaluation = cost
+                        policy.save(os.path.join(logdir, "model-best.l2o"))
+                        result.saved_epochs.append(k + 1)
+            if logdir is not None and (k + 1) % spec.save_period == 0:
+                policy.save(os.path.join(logdir, "model-iter{}.l2o".format(k + 1)))
+        if logdir is not None:
+            policy.save(os.path.join(logdir, "model-final.l2o"))
+    result.best_evaluation = best_evaluation
+    return result

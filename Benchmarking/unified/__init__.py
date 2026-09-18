@@ -24,18 +24,21 @@ from core.registry import list_methods, register_method
 
 from unified.learned.dm import DM_SPEC
 from unified.learned.rnnprop import RNNPROP_SPEC
+from unified.learned.scale import SCALE_SPEC
 from unified.methods import UnifiedModelFreeMethod, UnifiedUnrolledMethod
 from unified.problem import PROBLEMS, register_problem
 from unified.tasks.lasso import LassoDatasetDialect, LassoUnrolledDialect
 from unified.tasks.quadratic import QuadraticDialect
-from unified.unrolled.specs import ALISTA_SPEC, LISTA_SPEC
+from unified.unrolled.specs import ALISTA_SPEC, LFISTA_SPEC, LISTA_SPEC
 
 PROBLEM_DIALECTS = (LassoDatasetDialect(), LassoUnrolledDialect(), QuadraticDialect())
 METHODS = (
     UnifiedModelFreeMethod(DM_SPEC),
     UnifiedModelFreeMethod(RNNPROP_SPEC),
+    UnifiedModelFreeMethod(SCALE_SPEC),
     UnifiedUnrolledMethod(LISTA_SPEC),
     UnifiedUnrolledMethod(ALISTA_SPEC),
+    UnifiedUnrolledMethod(LFISTA_SPEC),
 )
 METHOD_NAMES = tuple(m.name for m in METHODS)
 MODEL_FREE_NAMES = tuple(m.name for m in METHODS if isinstance(m, UnifiedModelFreeMethod))

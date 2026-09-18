@@ -45,6 +45,9 @@ from unified.problem import Batch, Problem, ProblemDialect
 from unified.schema import ConfigSchema
 
 
+_SCALE_MAX_SEED = 4294967295   # L2O-Scale problems/problem_generator.py MAX_SEED
+
+
 def x0_filename(split: str) -> str:
     """``test_sparsity_0.10.npy`` -> ``test_sparsity_0.10_x0.npy`` (data/lasso.py's rule)."""
     if not split.endswith(".npy"):
@@ -101,6 +104,20 @@ class LassoProblem(Problem):
         # problems.py:233 -- with replacement, from the GLOBAL numpy RNG
         return self._batch(np.random.randint(0, self.num_samples, size=self.batch_size))
 
+    def sample_rows(self, reseed_numpy: bool = False) -> Batch:
+        # L2O-Scale pg.Lasso: rows drawn (problem_generator.py:203), THEN
+        # Problem.__init__ draws a seed and reseeds numpy with it (:75, :82).
+        idx = np.random.randint(0, self.num_samples, size=self.batch_size)
+        if reseed_numpy:
+            np.random.seed(np.random.randint(_SCALE_MAX_SEED, dtype=np.int64))
+        rows = self._data[idx]
+        return Batch(x0=None, data={"idx": idx, "b": rows[:, :self.m], "x_true": rows[:, self.m:]})
+
+    def redraw_x0(self, batch: Batch) -> Batch:
+        import tensorflow as tf   # pg.Lasso.init_tensors: tf.random.normal(shape, stddev=0.01)
+        x0 = tf.random.normal((len(batch.data["idx"]), self.n), stddev=self.x0_stddev).numpy()
+        return Batch(x0=x0, data=batch.data)
+
     def walk(self) -> Iterator[Batch]:
         for start in range(0, self.num_samples, self.batch_size):
             yield self._batch(np.arange(start, min(start + self.batch_size, self.num_samples)))
@@ -141,19 +158,35 @@ class LassoProblem(Problem):
             num_fista_iters=int(eval_section["num_fista_iters"]),
             xstar_cache_dir=eval_section.get("xstar_cache_dir")).to_dict()
 
-    def write_eval_artifacts(self, result, output_path: str, tag: str) -> Dict[str, str]:
-        """Same files/layout as evaluate_{dm,rnnprop}.py so parity can diff artifacts."""
+    def write_eval_artifacts(self, result, output_path: str, tag: str, layout: str = "dm",
+                             seed: int = 0, **_) -> Dict[str, str]:
+        """The library scripts' own files so parity can diff artifacts:
+        ``layout="dm"``: evaluate_{dm,rnnprop}.py's ``<tag>_eval_loss_record.pickle-lasso_dataset``
+        + ``<tag>_recovery-lasso_dataset.npz``; ``layout="scale"``: L2O-Scale/evaluate.py's
+        ``seed<seed>_eval_loss_record.pickle-benchmark`` + ``L2o_recovery-lasso_dataset.npz``
+        (the npz name is fixed there whatever the optimizer)."""
         os.makedirs(output_path, exist_ok=True)
-        pickle_path = os.path.join(output_path, "{}_eval_loss_record.pickle-lasso_dataset".format(tag))
+        if layout == "dm":
+            pickle_name = "{}_eval_loss_record.pickle-lasso_dataset".format(tag)
+            npz_name = "{}_recovery-lasso_dataset.npz".format(tag)
+        elif layout == "scale":
+            pickle_name = "seed{}_eval_loss_record.pickle-benchmark".format(seed)
+            npz_name = "L2o_recovery-lasso_dataset.npz"
+        else:
+            raise ValueError("unknown artifact layout {!r}".format(layout))
+        pickle_path = os.path.join(output_path, pickle_name)
         with open(pickle_path, "wb") as f:
             pickle.dump(list(result.trajectory), f)
-        recovery_path = os.path.join(output_path, "{}_recovery-lasso_dataset.npz".format(tag))
+        recovery_path = os.path.join(output_path, npz_name)
         np.savez(recovery_path, x_pred=result.x_pred, x_true=self._stack(result.batches, "x_true"),
                  b=self._stack(result.batches, "b"), x0=np.concatenate([b.x0 for b in result.batches]))
         return {"eval_pickle": pickle_path, "recovery": recovery_path}
 
-    def training_recovery(self, batch: Batch, x_pred: np.ndarray) -> Dict[str, np.ndarray]:
-        return {"x_pred": x_pred, "x_true": batch.data["x_true"], "b": batch.data["b"], "x0": batch.x0}
+    def training_recovery(self, batch: Batch, x_pred: np.ndarray, layout: str = "dm") -> Dict[str, np.ndarray]:
+        rec = {"x_pred": x_pred, "x_true": batch.data["x_true"], "b": batch.data["b"]}
+        if layout == "dm":          # L2O-Scale/metaopt.py writes no x0
+            rec["x0"] = batch.x0
+        return rec
 
 
 # ---------------------------------------------------------------- dialects

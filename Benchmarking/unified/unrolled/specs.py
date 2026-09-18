@@ -18,7 +18,7 @@ def _build(model_name):
         return build_model(model_name, problem.a, int(ident["num_layers"]), float(ident["model_lam"]),
                            w_alista=problem.w_alista, ss_q_per_layer=float(ident["ss_q_per_layer"]),
                            ss_maxq=float(ident["ss_maxq"]), share_W=bool(ident["share_W"]),
-                           create_cells=create_cells)
+                           create_cells=create_cells, ident=ident)
     return build
 
 
@@ -55,13 +55,19 @@ _IDENTITY = ("num_layers", "lasso_lam", "model_lam", "ss_q_per_layer", "ss_maxq"
 _IDENTITY_DEFAULTS = {"model_lam": 0.4, "ss_q_per_layer": 1.2, "ss_maxq": 13.0, "share_W": False}
 
 
-def _spec(name, model_name):
+def _spec(name, model_name, extra_identity=(), extra_defaults=None):
+    identity = _IDENTITY + tuple(extra_identity)
+    defaults = {**_IDENTITY_DEFAULTS, **(extra_defaults or {})}
     return ModelSpec(
         name=name, problem="lasso", build=_build(model_name), load_checkpoint=_load, train=_train,
-        make_solver=_solver, identity_keys=_IDENTITY, identity_defaults=_IDENTITY_DEFAULTS,
-        train_schema=_TRAIN_SCHEMA.merge(ConfigSchema.of(allowed=_IDENTITY)),
+        make_solver=_solver, identity_keys=identity, identity_defaults=defaults,
+        train_schema=_TRAIN_SCHEMA.merge(ConfigSchema.of(allowed=identity)),
         eval_schema=_EVAL_SCHEMA)
 
 
 LISTA_SPEC = _spec("unified-lista", "lista")
 ALISTA_SPEC = _spec("unified-alista", "alista")
+# x0_at_layer0 is an identity key (see unrolled/lfista.py): False = the library's
+# behaviour (parity target), True = the platform's start-point fairness.
+LFISTA_SPEC = _spec("unified-lfista", "lfista", extra_identity=("x0_at_layer0",),
+                    extra_defaults={"x0_at_layer0": False})

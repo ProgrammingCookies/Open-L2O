@@ -19,8 +19,12 @@ This is the acceptance test of the unified slice. Two sources of checkpoints:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import pickle
+import subprocess
+import sys
+import textwrap
 
 import numpy as np
 import pytest
@@ -29,6 +33,7 @@ import adapters  # noqa: F401
 import unified  # noqa: F401
 from core.fingerprint import METRIC_KEY, fingerprints_agree
 from core.registry import get_method
+from unified.methods import UnifiedModelFreeMethod
 from tests.fairness_matrix import make_lasso_tiny, _FISTA_ITERS, _LASSO_BATCH
 
 _RUNS = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "runs"))
@@ -310,3 +315,207 @@ def test_quadratic_tiny_adapter_checkpoint_parity(variant, extra, tmp_path):
     u_out = uni.evaluate(cfg, ckpt, os.path.join(str(tmp_path), "unified"))
     assert np.array_equal(np.asarray(a_out.trajectory), np.asarray(u_out.trajectory)), (
         "max |diff| {:.3e}".format(float(np.max(np.abs(np.asarray(a_out.trajectory) - np.asarray(u_out.trajectory))))))
+
+
+# --------------------------------------------------------------------------
+# L2O-Scale (unified-scale): the in-place, RNG-hungry optimizer. Same machine
+# on both sides -> bit-exact, including the dummy-step preamble and the
+# per-step dead random draws the library's Problem.gradients makes.
+# --------------------------------------------------------------------------
+
+_SCALE_IDENTITY = {"optimizer": "HierarchicalRNN", "cell_cls": "GRUCell", "cell_size": 20, "num_cells": 2}
+_SCALE_TINY_TRAIN = {"lasso_split": "train_data.npy", "lasso_batch_size": _LASSO_BATCH,
+                     "num_problems": 2, "num_meta_iterations": 2, "fix_unroll": True, "fix_unroll_length": 5,
+                     "fix_num_steps": 10, "fix_num_steps_eval": 10, "evaluation_period": 1,
+                     "evaluation_epochs": 1, "save_period": 1, "min_lr": 1e-3, "max_lr": 1e-1,
+                     "select_checkpoint": "best"}
+
+
+def _scale_train_section(fixture):
+    return {**_SCALE_IDENTITY, "lasso_data_dir": fixture.parts["width_dir"], "lasso_lam": fixture.parts["lam"],
+            **_SCALE_TINY_TRAIN}
+
+
+def _scale_eval_section(fixture, test_optimizer, num_steps=10):
+    return {"test_optimizer": test_optimizer, "num_testing_itrs": num_steps,
+            "lasso_data_dir": fixture.parts["width_dir"], "lasso_split": fixture.parts["test_file"],
+            "lasso_batch_size": _LASSO_BATCH, "lasso_lam": fixture.parts["lam"], "min_lr": 1e-3, "max_lr": 1e-1,
+            "num_fista_iters": _FISTA_ITERS, "xstar_cache_dir": os.path.join(fixture.root, "xstar_cache")}
+
+
+def _assert_scale_parity_per_chunk(a_out, cfg, ckpt, out_dir, label):
+    """Before its 2026-09-18 fix, L2O-Scale/evaluate.py's per-chunk behaviour was
+    allocator-dependent: a chunk's real variable either got a fresh optimizer
+    slot or inherited the dummy step's (when CPython reused the freed dummy's
+    id(); see RESULTS_VALIDITY.md). Both behaviours are implemented by
+    ``ScalePolicy(dummy_slot=...)``, so parity is checked PER CHUNK -- the
+    script's x_pred rows for a chunk must be bit-identical to one of the two
+    unified variants and its averaged trajectory must equal the mean of the
+    matched per-chunk trajectories -- and the caller then asserts that every
+    chunk is the fresh one. Kept in this form so a regression of the fix is
+    diagnosed, not just detected."""
+    from unified.evalwalk import evaluate_split
+    from unified.learned import scale as scale_mod
+    from unified.problem import PROBLEMS
+    from unified.solver import PolicySolver
+    ev = scale_mod.SCALE_SPEC.eval_schema.merge(PROBLEMS["lasso_dataset"].eval_schema).validate(cfg["eval"], "eval")
+    (label_, problem), = PROBLEMS["lasso_dataset"].eval_problems({**cfg, "eval": ev})
+    variants = {}
+    for mode in ("fresh", "inherit"):
+        import tensorflow as tf
+        tf.random.set_seed(cfg["seed"])
+        variants[mode] = evaluate_split(
+            lambda: PolicySolver(scale_mod.ScalePolicy(min_lr=float(ev["min_lr"]), max_lr=float(ev["max_lr"]),
+                                                       checkpoint=ckpt, dummy_slot=mode), problem),
+            problem, int(ev["num_testing_itrs"]), "batch_mean", label=label_)
+    a_x = np.load(a_out.artifacts["recovery"])["x_pred"]
+    sizes = [b.x0.shape[0] for b in variants["fresh"].batches]
+    starts = np.cumsum([0] + sizes[:-1])
+    chosen, expected = [], np.zeros(int(ev["num_testing_itrs"]), np.float64)
+    for i, (start, size) in enumerate(zip(starts, sizes)):
+        rows = a_x[start:start + size]
+        match = [m for m in ("fresh", "inherit") if np.array_equal(rows, variants[m].x_pred[start:start + size])]
+        assert match, "{} chunk {}: the script's x_pred rows match neither the fresh nor the inherited-slot " \
+                      "variant (max |diff| fresh {:.3e}, inherit {:.3e})".format(
+                          label, i, float(np.abs(rows - variants["fresh"].x_pred[start:start + size]).max()),
+                          float(np.abs(rows - variants["inherit"].x_pred[start:start + size]).max()))
+        chosen.append(match[0])
+        expected += np.array(variants[match[0]].chunk_trajectories[i], np.float64)
+    expected = expected / len(sizes)
+    ta = np.asarray(a_out.trajectory, np.float64)
+    assert np.array_equal(ta, expected), "{}: averaged trajectory differs from the per-chunk reconstruction " \
+                                         "(chunks {}); max |diff| {:.3e}".format(label, chosen, float(np.abs(ta - expected).max()))
+    return chosen
+
+
+def _assert_bit_identical(a_out, u_out):
+    ta, tu = np.asarray(a_out.trajectory), np.asarray(u_out.trajectory)
+    assert ta.shape == tu.shape, (ta.shape, tu.shape)
+    assert np.array_equal(ta, tu), "trajectory differs: max |diff| {:.3e} at step {}".format(
+        float(np.max(np.abs(ta - tu))), int(np.argmax(np.abs(ta - tu))))
+    ra, ru = np.load(a_out.artifacts["recovery"]), np.load(u_out.artifacts["recovery"])
+    assert np.array_equal(ra["x_pred"], ru["x_pred"]), "x_pred differs: max |diff| {:.3e}".format(
+        float(np.max(np.abs(ra["x_pred"] - ru["x_pred"]))))
+    assert fingerprints_agree(a_out.metrics[METRIC_KEY], u_out.metrics[METRIC_KEY])
+
+
+@pytest.fixture(scope="session")
+def scale_tiny_checkpoint(fixture_root, tmp_path_factory):
+    """A tiny L2O-Scale checkpoint trained through the EXISTING adapter (shared by the tests below)."""
+    fixture = make_lasso_tiny(fixture_root, 7)
+    out_dir = str(tmp_path_factory.mktemp("scale_tiny_train"))
+    ckpt = get_method("l2o-scale").train(
+        {"method": "l2o-scale", "problem": "lasso_dataset", "seed": 7, "train": _scale_train_section(fixture)},
+        out_dir).checkpoint
+    return fixture, ckpt
+
+
+@pytest.mark.slow
+def test_scale_tiny_adapter_checkpoint_parity(scale_tiny_checkpoint, tmp_path):
+    fixture, ckpt = scale_tiny_checkpoint
+    cfg = {"method": "l2o-scale", "problem": "lasso_dataset", "seed": 7,
+           "train": _scale_train_section(fixture), "eval": _scale_eval_section(fixture, "L2o")}
+    a_out = get_method("l2o-scale").evaluate(cfg, ckpt, os.path.join(str(tmp_path), "adapter"))
+    u_out = get_method("unified-scale").evaluate(cfg, ckpt, os.path.join(str(tmp_path), "unified"))
+    assert os.path.basename(u_out.artifacts["eval_pickle"]) == "seed7_eval_loss_record.pickle-benchmark"
+    assert fingerprints_agree(a_out.metrics[METRIC_KEY], u_out.metrics[METRIC_KEY])
+    chosen = _assert_scale_parity_per_chunk(a_out, cfg, ckpt, str(tmp_path), "tiny")
+    # With the 2026-09-18 fix in L2O-Scale/evaluate.py every chunk is the fresh
+    # variant, i.e. the registered unified-scale is bit-identical outright.
+    assert all(c == "fresh" for c in chosen), chosen
+    _assert_bit_identical(a_out, u_out)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("classical", ["Adam", "SGD", "Adagrad"])
+def test_scale_classical_parity(classical, fixture_root, tmp_path):
+    fixture = make_lasso_tiny(fixture_root, 7)
+    cfg = {"method": "l2o-scale", "problem": "lasso_dataset", "seed": 7,
+           "train": _scale_train_section(fixture), "eval": _scale_eval_section(fixture, classical)}
+    a_out = get_method("l2o-scale").evaluate(cfg, None, os.path.join(str(tmp_path), "adapter"))
+    u_out = get_method("unified-scale").evaluate(cfg, None, os.path.join(str(tmp_path), "unified"))
+    _assert_bit_identical(a_out, u_out)
+
+
+@pytest.mark.slow
+def test_scale_real_checkpoint_parity(parity_steps, tmp_path_factory):
+    """runs/exp2_try2_scale_narrow's model-best.l2o: no stored evaluation exists,
+    so the target is the ADAPTER replayed on this machine (a ``--parity-steps``
+    prefix; costs are pre-step, so a prefix is independent of the total)."""
+    run = os.path.join(_RUNS, "exp2_try2_scale_narrow")
+    ckpt = os.path.join(run, "checkpoints", "s21", "narrow", "l2o-scale", "checkpoints",
+                        "HierarchicalRNN_GRUCell_20_2", "model-best.l2o")
+    data_dir = os.path.join(run, "data", "seed21", "narrow")
+    if not (os.path.exists(ckpt) and os.path.exists(os.path.join(data_dir, "A.npy"))):
+        pytest.skip("real Scale run artefacts missing")
+    steps = int(parity_steps)
+    out_dir = str(tmp_path_factory.mktemp("scale_real"))
+    ev = {"test_optimizer": "L2o", "num_testing_itrs": steps, "lasso_data_dir": data_dir,
+          "lasso_split": "test_sparsity_0.10.npy", "lasso_batch_size": 128, "lasso_lam": 0.005,
+          "min_lr": 1e-3, "max_lr": 1e-1,
+          # the adapter recomputes the recovery metrics and requires these; the
+          # x* cache goes to the session tmp dir, never into runs/
+          "num_fista_iters": 2000, "xstar_cache_dir": os.path.join(out_dir, "xstar_cache")}
+    cfg = {"method": "l2o-scale", "problem": "lasso_dataset", "seed": 21, "train": {**_SCALE_IDENTITY},
+           "eval": ev}
+    a_out = get_method("l2o-scale").evaluate(cfg, ckpt, os.path.join(out_dir, "adapter"))
+    u_out = get_method("unified-scale").evaluate(cfg, ckpt, os.path.join(out_dir, "unified"))
+    _assert_bit_identical(a_out, u_out)
+
+
+# --------------------------------------------------------------------------
+# LFISTA (unified-lfista): the second unrolled family. The library's weights
+# are untrackable tf.Variables that never train, so the only library target is
+# its untrained forward pass -- computed in a Model_Base_L2O subprocess (that
+# library's top-level modules must not be imported next to the others').
+# --------------------------------------------------------------------------
+
+_LFISTA_LIBRARY_FORWARD = textwrap.dedent("""
+    import sys, numpy as np, tensorflow as tf
+    import models
+    data_dir, fname, out, T = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+    A = np.load(data_dir + "/A.npy").astype(np.float32)
+    m, n = A.shape
+    split = np.load(data_dir + "/" + fname).astype(np.float32)
+    x0 = np.load(data_dir + "/" + fname[:-4] + "_x0.npy").astype(np.float32)
+    model = models.Lfista(A, T, 0.005)
+    for k in range(T):
+        model.create_cell(k)
+    h = tf.concat([tf.constant(split[:, :m]), tf.constant(x0)], 1)   # [b, x0], as UnrolledSolver feeds it
+    layers = [h[:, -n:].numpy()]
+    for cell in model.layers:
+        h = cell(h)
+        layers.append(h[:, -n:].numpy())
+    np.save(out, np.stack(layers))
+    print("OK", len(layers))
+""")
+
+
+@pytest.mark.slow
+def test_lfista_untrained_forward_matches_library(fixture_root, tmp_path):
+    from core.shell import REPO_ROOT
+    from unified.tasks.lasso import LassoProblem
+    from unified.unrolled.lista import UnrolledSolver, build_model
+    fixture = make_lasso_tiny(fixture_root, 7)
+    T = 4
+    out = os.path.join(str(tmp_path), "library_layers.npy")
+    proc = subprocess.run(
+        [sys.executable, "-c", _LFISTA_LIBRARY_FORWARD, fixture.parts["width_dir"], fixture.parts["test_file"], out, str(T)],
+        cwd=os.path.join(str(REPO_ROOT), "Model_Base_L2O"), capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-4000:]
+    library = np.load(out)                                          # (T+1, rows, n)
+
+    problem = LassoProblem(fixture.parts["width_dir"], fixture.parts["test_file"], lam=0.005, batch_size=1024)
+    model = build_model("lfista", problem.a, T, 0.005, ident={"x0_at_layer0": False})
+    batch = next(problem.walk())
+    unified = np.stack([np.asarray(x) for x in UnrolledSolver(model).iterate(batch, T)])
+    assert unified.shape == library.shape
+    for k in range(T + 1):
+        assert np.array_equal(unified[k], library[k]), "layer {} differs (max |diff| {:.3e})".format(
+            k, float(np.abs(unified[k] - library[k]).max()))
+    # and the x0-consuming variant is a different model at layers 0 and 1 only
+    # in what it reads, so with x0 ~ N(0, 0.01^2) it must stay close but not equal
+    fair = build_model("lfista", problem.a, T, 0.005, ident={"x0_at_layer0": True})
+    unified_fair = np.stack([np.asarray(x) for x in UnrolledSolver(fair).iterate(batch, T)])
+    assert not np.array_equal(unified_fair[1], unified[1])
+    assert np.allclose(unified_fair[1], unified[1], atol=0.1)

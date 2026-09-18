@@ -140,6 +140,14 @@ def _lasso_model_based(fixture: Fixture, seed: int) -> Dict[str, Any]:
     }
 
 
+def _lasso_lfista_fair(fixture: Fixture, seed: int) -> Dict[str, Any]:
+    # The library's LFISTA starts from x = 0; the platform's fairness contract
+    # is the seeded x0, so the fairness entry uses the x0-consuming variant.
+    cfg = _lasso_model_based(fixture, seed)
+    cfg["train"]["x0_at_layer0"] = True
+    return cfg
+
+
 # --------------------------------------------------------------------------
 # "quadratic": L2O-DM's built-in toy problem; W, y and x0 are drawn from
 # tf.random, so here the evaluation seed is what selects the instances. No
@@ -185,8 +193,10 @@ ENTRIES: List[Entry] = [
             "l2o-rnnprop": _lasso_rnnprop,
             "unified-rnnprop": _lasso_rnnprop,
             "unified-dm": _lasso_dm,
+            "unified-scale": _lasso_scale,
             "unified-lista": _lasso_model_based,
             "unified-alista": _lasso_model_based,
+            "unified-lfista": _lasso_lfista_fair,
         },
         seed_selects_eval_instances=False,
         fingerprint_required=True,

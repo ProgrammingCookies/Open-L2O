@@ -53,6 +53,18 @@ class Problem(abc.ABC):
     def sample(self) -> Batch:
         """A training batch, drawn the way the library script draws it (global RNG)."""
 
+    def sample_rows(self, reseed_numpy: bool = False) -> Batch:
+        """A training batch WITHOUT its starting point (``x0`` is None), for
+        loops that draw x0 per trajectory rather than per batch (L2O-Scale);
+        ``reseed_numpy`` reproduces its ``Problem.__init__`` quirk (a
+        ``np.random.randint(MAX_SEED)`` draw that reseeds numpy)."""
+        raise NotImplementedError("{} has no row-only sampling".format(type(self).__name__))
+
+    def redraw_x0(self, batch: Batch) -> Batch:
+        """The same instances with a freshly drawn starting point (L2O-Scale's
+        ``new_trajectory``: ``tf.random.normal(stddev=x0_stddev)``)."""
+        raise NotImplementedError("{} has no x0 redraw".format(type(self).__name__))
+
     @abc.abstractmethod
     def walk(self) -> Iterator[Batch]:
         """The evaluation pass: every instance once, in the script's order."""
@@ -92,11 +104,13 @@ class Problem(abc.ABC):
         """Problem-specific metrics of the final iterate (LASSO: the four Table-4 metrics)."""
         return {}
 
-    def write_eval_artifacts(self, result, output_path: str, tag: str) -> Dict[str, str]:
-        """Files in the library script's own layout, for diff-based parity tests."""
+    def write_eval_artifacts(self, result, output_path: str, tag: str, **context) -> Dict[str, str]:
+        """Files in the library script's own layout, for diff-based parity tests.
+        ``context`` carries the method's ``artifact_layout`` and ``seed``."""
         return {}
 
-    def training_recovery(self, batch: Batch, x_pred: np.ndarray) -> Optional[Dict[str, np.ndarray]]:
+    def training_recovery(self, batch: Batch, x_pred: np.ndarray, layout: str = "dm"
+                          ) -> Optional[Dict[str, np.ndarray]]:
         """Arrays for the training scripts' ``recovery.npz`` (written after each
         in-training evaluation), or None if the script writes none for this problem."""
         return None
