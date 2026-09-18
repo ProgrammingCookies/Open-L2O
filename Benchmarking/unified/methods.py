@@ -1,11 +1,21 @@
 """``L2OMethod`` implementations backed by the unified in-process code.
 
-Config vocabulary is the adapters' (``adapters/dm_rnnprop.py``), i.e. the
-keys ``experiments/v2/experiment2.py::_build_train_config`` / ``run_cell``
-emit, so an experiment can swap ``l2o-rnnprop`` for ``unified-rnnprop``
-without touching its config builder. Unknown keys raise rather than being
-silently ignored (the subprocess adapters would have failed on an unknown
-CLI flag too).
+Two generic classes, no method or problem names inside:
+
+* ``UnifiedModelFreeMethod(PolicySpec)`` -- a learned optimizer on any
+  registered ``"model_free"`` problem dialect: ``meta_train`` for ``train()``,
+  the evaluation walk with the learned policy or a classical baseline
+  (``eval.optimizer``) for ``evaluate()``.
+* ``UnifiedUnrolledMethod(ModelSpec)`` -- an unrolled network on its
+  ``"unrolled"`` problem dialect: the spec's training procedure, then the
+  walk with the spec's solver.
+
+Config vocabulary is the adapters' (``adapters/dm_rnnprop.py``,
+``adapters/model_based.py``): the keys ``experiments/v2/experiment2.py``
+emits work unchanged. Each section is validated against the method spec's
+schema merged with the problem dialect's, so unknown keys raise rather than
+being silently ignored (the subprocess adapters would have failed on an
+unknown CLI flag too).
 """
 
 from __future__ import annotations
@@ -14,34 +24,16 @@ import json
 import logging
 import os
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 
 from core.config import require
 from core.method import L2OMethod
 from core.result import EvalOutput, TrainOutput
-
-_MODEL_FREE_TRAIN_KEYS = {
-    # train_{dm,rnnprop}.py flags
-    "save_path", "num_epochs", "evaluation_period", "evaluation_epochs", "num_steps",
-    "unroll_length", "fix_num_unrolls", "profile_path", "seed", "learning_rate",
-    "second_derivatives", "last_step_loss", "beta1", "beta2", "problem", "if_scale",
-    "rd_scale_bound", "if_cl", "min_num_eval", "if_mt", "num_mt", "optimizers", "mt_ratio",
-    "mt_ratios", "k", "lasso_data_dir", "lasso_split", "lasso_batch_size", "lasso_lam",
-    "lasso_x0_mode",
-}
-# Accepted by the scripts but not ported in the unified slice (Experiment 2 never sets them).
-_MODEL_FREE_UNPORTED = ("if_cl", "if_mt", "if_scale", "fix_num_unrolls")
-
-_MODEL_FREE_EVAL_KEYS = {
-    # evaluate_{dm,rnnprop}.py flags
-    "optimizer", "problem", "path", "output_path", "num_epochs", "num_steps",
-    "learning_rate", "seed", "lasso_data_dir", "lasso_split", "lasso_batch_size",
-    "lasso_lam", "beta1", "beta2", "lasso_x0_mode",
-    # harness-level keys consumed here, not by the scripts
-    "num_fista_iters", "xstar_cache_dir", "test_files",
-}
+from unified.model import ModelSpec
+from unified.policy import PolicySpec
+from unified.problem import get_dialect
 
 
 def _seed_everything(seed: Optional[int]) -> None:
@@ -55,209 +47,165 @@ def _seed_everything(seed: Optional[int]) -> None:
     tf.random.set_seed(seed)
 
 
-def _check_keys(section: Dict[str, Any], allowed: set, where: str) -> None:
-    unknown = sorted(set(section) - allowed)
-    if unknown:
-        raise ValueError("{}: unknown config keys {} (allowed: {})".format(
-            where, unknown, sorted(allowed)))
+class _LogFile:
+    def __init__(self, path: str, header: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.path = path
+        self._f = open(path, "w")
+        self(header)
 
+    def __call__(self, line: str) -> None:
+        self._f.write(line + "\n")
+        self._f.flush()
+
+    def close(self) -> None:
+        self._f.close()
+
+
+# ---------------------------------------------------------------- model-free
 
 class UnifiedModelFreeMethod(L2OMethod):
-    """L2O-DM / L2O-RNNProp (and, later, L2O-Scale) on the LASSO dataset problem."""
+    def __init__(self, spec: PolicySpec):
+        self.spec = spec
+        self.name = spec.name
 
-    def __init__(self, name: str, variant: str):
-        assert variant in ("dm", "rnnprop")
-        self.name = name
-        self.variant = variant
-
-    # ------------------------------------------------------------------ helpers
-
-    def _policy(self, section: Dict[str, Any]):
-        from unified.policies import DMPolicy, RNNPropPolicy
-        if self.variant == "dm":
-            if "beta1" in section or "beta2" in section:
-                # train_dm.py / evaluate_dm.py have no such flags: argparse would reject them.
-                raise ValueError("{}: beta1/beta2 are RNNProp-only".format(self.name))
-            return DMPolicy()
-        return RNNPropPolicy(beta1=float(section.get("beta1", 0.95)),
-                             beta2=float(section.get("beta2", 0.95)))
-
-    def _require_lasso(self, config: Dict[str, Any]) -> None:
+    def _dialect(self, config: Dict[str, Any]):
         problem = require(config, "problem", "{} requires config['problem']".format(self.name))
-        if problem != "lasso_dataset":
-            raise NotImplementedError(
-                "{} implements only problem='lasso_dataset' (got {!r}); use the "
-                "adapter-backed l2o-{} for other problems".format(self.name, problem, self.variant))
+        return get_dialect(problem, "model_free", self.name)
 
     # ------------------------------------------------------------------- train
 
     def train(self, config: Dict[str, Any], output_dir: str) -> TrainOutput:
-        from unified.instances import LassoInstances
         from unified.meta_train import MetaTrainSpec, meta_train
-        from unified.objective import LassoObjective
 
-        self._require_lasso(config)
-        tr = dict(config.get("train", {}))
-        _check_keys(tr, _MODEL_FREE_TRAIN_KEYS, "{}.train config['train']".format(self.name))
-        for flag in _MODEL_FREE_UNPORTED:
-            if tr.get(flag):
-                raise NotImplementedError("{}: --{} is not ported in the unified slice; use the "
-                                          "adapter-backed l2o-{}".format(self.name, flag, self.variant))
-        if tr.get("profile_path"):
-            logging.warning("%s: profile_path is ignored by the unified slice (no per-epoch JSONL profile)", self.name)
-        if self.variant == "dm" and ("last_step_loss" in tr or "lasso_x0_mode" in tr):
-            raise ValueError("{}: last_step_loss/lasso_x0_mode are RNNProp-only flags".format(self.name))
-        data_dir = require(tr, "lasso_data_dir", "{} requires config['train']['lasso_data_dir']".format(self.name))
-        num_epochs = int(require(tr, "num_epochs", "{} requires config['train']['num_epochs']".format(self.name)))
+        dialect = self._dialect(config)
+        schema = self.spec.train_schema.merge(dialect.train_schema)
+        tr = schema.validate(config.get("train", {}), "{}.train config['train']".format(self.name))
+        for k, v in self.spec.train_defaults.items():        # the script's own defaults
+            if k not in config.get("train", {}):
+                tr[k] = v
+        cfg = {**config, "train": tr}
 
         spec = MetaTrainSpec(
-            num_epochs=num_epochs,
-            num_steps=int(tr.get("num_steps", 100)),
-            unroll_length=int(tr.get("unroll_length", 20)),
+            num_epochs=int(tr["num_epochs"]), num_steps=int(tr["num_steps"]),
+            unroll_length=int(tr["unroll_length"]),
             meta_loss="last" if tr.get("last_step_loss") else "sum",
-            learning_rate=float(tr.get("learning_rate", 0.001)),
-            gradient_clip=None,
-            second_derivatives=bool(tr.get("second_derivatives", False)),
-            # train_dm.py defaults evaluation_period to 100, train_rnnprop.py to 10
-            evaluation_period=int(tr.get("evaluation_period", 100 if self.variant == "dm" else 10)),
-            evaluation_epochs=int(tr.get("evaluation_epochs", 20)),
-            batch_size=int(tr.get("lasso_batch_size", 128)),
+            learning_rate=float(tr["learning_rate"]), gradient_clip=None,
+            second_derivatives=bool(tr["second_derivatives"]),
+            evaluation_period=int(tr["evaluation_period"]), evaluation_epochs=int(tr["evaluation_epochs"]),
         )
         save_path = os.path.join(os.path.abspath(output_dir), "checkpoint")
-        os.makedirs(output_dir, exist_ok=True)
-        log_path = os.path.join(output_dir, "train.log")
-
-        _seed_everything(config.get("seed"))
-        instances = LassoInstances(data_dir, tr.get("lasso_split", "train_data.npy"),
-                                   x0_mode=tr.get("lasso_x0_mode", "aligned"))
-        objective = LassoObjective(instances.a, float(tr.get("lasso_lam", 0.005)))
-        policy = self._policy(tr)
-        with open(log_path, "w") as log_file:
-            def log(line):
-                log_file.write(line + "\n")
-                log_file.flush()
+        log = _LogFile(os.path.join(output_dir, "train.log"),
+                       "# in-process {} train: {}".format(self.name, json.dumps(tr, sort_keys=True, default=str)))
+        try:
+            _seed_everything(config.get("seed"))
+            problem = dialect.train_problem(cfg)
+            policy = self.spec.make_policy(tr)
             spec.log = log
-            log("# in-process {} train: {}".format(self.name, json.dumps(tr, sort_keys=True, default=str)))
-            result = meta_train(policy, objective, instances, spec, save_path)
+            result = meta_train(policy, problem, spec, save_path)
+        finally:
+            log.close()
+        artifacts = {"train_log": log.path}
+        if os.path.exists(os.path.join(save_path, "recovery.npz")):
+            artifacts["recovery"] = os.path.join(save_path, "recovery.npz")
         return TrainOutput(
             checkpoint=save_path,
             metrics={"save_path": save_path, "best_evaluation": result.best_evaluation,
                      "saved_epochs": result.saved_epochs, "final_training_loss": result.epoch_losses[-1]},
-            artifacts={"train_log": log_path, "recovery": os.path.join(save_path, "recovery.npz")},
-            command="in-process {}".format(self.name),
-        )
+            artifacts=artifacts, command="in-process {}".format(self.name))
 
     # ---------------------------------------------------------------- evaluate
 
     def evaluate(self, config: Dict[str, Any], checkpoint: Optional[str],
                  output_dir: str) -> EvalOutput:
-        from unified.evalwalk import evaluate_split, to_eval_output, write_model_free_artifacts
-        from unified.instances import LassoInstances
-        from unified.objective import LassoObjective
-        from unified.policies import ClassicalAdamPolicy
+        import tensorflow as tf
+        from unified.evalwalk import evaluate_split, to_eval_output
+        from unified.learned.classical import CLASSICAL
         from unified.solver import PolicySolver
 
-        self._require_lasso(config)
-        ev = dict(config.get("eval", {}))
-        _check_keys(ev, _MODEL_FREE_EVAL_KEYS, "{}.evaluate config['eval']".format(self.name))
-        opt = require(ev, "optimizer", "{} requires config['eval']['optimizer']".format(self.name))
-        num_steps = int(require(ev, "num_steps", "{} requires config['eval']['num_steps']".format(self.name)))
-        data_dir = require(ev, "lasso_data_dir", "{} requires config['eval']['lasso_data_dir']".format(self.name))
-        batch_size = int(ev.get("lasso_batch_size", 128))
-        lam = float(ev.get("lasso_lam", 0.005))
-        x0_mode = ev.get("lasso_x0_mode", "aligned")
-        if self.variant == "dm" and "lasso_x0_mode" in ev:
-            raise ValueError("{}: evaluate_dm.py has no --lasso_x0_mode flag".format(self.name))
-        if ev.get("num_epochs", 1) != 1:
-            logging.warning("--num_epochs is ignored for lasso_dataset: one deterministic pass over the split")
-        splits: List[str] = list(ev["test_files"]) if "test_files" in ev else [ev.get("lasso_split", "val_data.npy")]
-
-        _seed_everything(config.get("seed"))
+        dialect = self._dialect(config)
+        schema = self.spec.eval_schema.merge(dialect.eval_schema)
+        ev = schema.validate(config.get("eval", {}), "{}.evaluate config['eval']".format(self.name))
+        cfg = {**config, "eval": ev}
+        opt = ev["optimizer"]
+        num_steps = int(ev["num_steps"])
         output_path = os.path.join(os.path.abspath(output_dir), "eval")
 
-        if opt == "Adam":
-            def make_policy():
-                return ClassicalAdamPolicy(float(ev.get("learning_rate", 0.001)))
-            fixed_policy = None
-        elif opt == "L2L":
+        _seed_everything(config.get("seed"))
+        labelled = dialect.eval_problems(cfg)
+
+        if opt == "L2L":
             # One network for the whole walk (the scripts build it once, before
-            # the chunk loop); RNN state is re-initialised per chunk by the solver.
-            fixed_policy = self._policy(ev)
+            # the chunk loop); the solver re-initialises its state per chunk.
+            policy = self.spec.make_policy(ev)
             if checkpoint is None:
                 logging.warning("Evaluating untrained L2L optimizer test")
+
             def make_policy():
-                return fixed_policy
+                return policy
+
+            def on_first_batch(batch):
+                # Build with a throw-away step, then load -- the scripts' order
+                # (Keras creates weights on the first forward pass).
+                if not policy.trainable_variables:
+                    policy.build(tf.constant(batch.x0))
+                    if checkpoint is not None:
+                        policy.restore(checkpoint, 0)
+            tag = self.spec.learned_tag
+        elif opt in CLASSICAL:
+            def make_policy():
+                return CLASSICAL[opt](ev)
+            on_first_batch = None
+            tag = opt
         else:
-            raise ValueError("{} is not a valid optimizer".format(opt))
+            raise ValueError("{} is not a valid optimizer (L2L or one of {})".format(opt, sorted(CLASSICAL)))
 
-        import tensorflow as tf
-        results, artifacts, a = [], {}, None
-        for split in splits:
-            instances = LassoInstances(data_dir, split, x0_mode=x0_mode)
-            a = instances.a if a is None else a
-            objective = LassoObjective(instances.a, lam)
-            if fixed_policy is not None and not fixed_policy.trainable_variables:
-                # Build with a throw-away step, then load -- the order the
-                # scripts use (Keras creates weights on the first forward pass).
-                first = next(instances.walk(batch_size))
-                fixed_policy.build(tf.constant(first.x0))
-                if checkpoint is not None:
-                    fixed_policy.restore(checkpoint, 0)
-            result = evaluate_split(
-                lambda: PolicySolver(make_policy(), objective),
-                instances, objective, batch_size, num_steps, reduction="batch_mean")
+        results, problems, artifacts = [], [], {}
+        for label, problem in labelled:
+            result = evaluate_split(lambda: PolicySolver(make_policy(), problem), problem, num_steps,
+                                    problem.eval_reduction, label=label, on_first_batch=on_first_batch)
             results.append(result)
-            tag_dir = output_path if len(splits) == 1 else os.path.join(output_path, split[:-len(".npy")])
-            for k, v in write_model_free_artifacts(result, tag_dir, opt).items():
-                artifacts[k if len(splits) == 1 else "{}:{}".format(split, k)] = v
+            problems.append(problem)
+            tag_dir = output_path if len(labelled) == 1 else os.path.join(output_path, os.path.splitext(label)[0])
+            for k, v in problem.write_eval_artifacts(result, tag_dir, tag).items():
+                artifacts[k if len(labelled) == 1 else "{}:{}".format(label, k)] = v
 
-        return to_eval_output(results, a, lam, ev.get("num_fista_iters"), ev.get("xstar_cache_dir"),
-                              artifacts, command="in-process {}".format(self.name))
+        return to_eval_output(results, problems, ev, artifacts, command="in-process {}".format(self.name))
 
     def run_classical_optimizer_eval(self, config: Dict[str, Any], classical: str,
                                      output_dir: str) -> EvalOutput:
-        if classical != "Adam":
-            raise ValueError("{} evaluation harness only supports the 'Adam' classical "
-                             "optimizer (got {!r})".format(self.name, classical))
+        from unified.learned.classical import CLASSICAL
+        if classical not in CLASSICAL:
+            raise ValueError("{} evaluation harness only supports the classical optimizers {} "
+                             "(got {!r})".format(self.name, sorted(CLASSICAL), classical))
         cfg = dict(config)
-        cfg["eval"] = {**cfg.get("eval", {}), "optimizer": "Adam"}
+        cfg["eval"] = {**cfg.get("eval", {}), "optimizer": classical}
         return self.evaluate(cfg, checkpoint=None, output_dir=output_dir)
 
 
-_UNROLLED_TRAIN_KEYS = {
-    # Model_Base_L2O/train.py flags the adapter forwards
-    "data_dir", "num_layers", "lasso_lam", "model_lam", "epochs", "patience", "base_lr",
-    "train_batch_size", "val_batch_size", "ss_q_per_layer", "ss_maxq", "share_W",
-    "track_training_curve", "training_curve_dir", "training_curve_test_file", "seed",
-    # unified-only, explicit non-parity option (see curriculum.py)
-    "keras_train_loss",
-}
-_UNROLLED_EVAL_KEYS = {"data_dir", "test_files", "num_fista_iters", "xstar_cache_dir",
-                       "val_batch_size", "seed", "lasso_lam"}
-
+# ------------------------------------------------------------------ unrolled
 
 class UnifiedUnrolledMethod(L2OMethod):
-    """LISTA / ALISTA: an unrolled network whose layer k is iteration k.
+    """An unrolled network whose layer k is iteration k.
 
-    Identity fields (``num_layers``, ``lasso_lam``, ``model_lam``, ``ss_*``,
-    ``share_W``) are read from ``config["train"]`` in both phases, as
-    ``adapters/model_based.py`` does, so evaluation cannot silently use a
-    different architecture than was trained.
+    Identity fields (``spec.identity_keys``) are read from ``config["train"]``
+    in both phases, as ``adapters/model_based.py`` does, so evaluation cannot
+    silently use a different architecture than was trained.
     """
 
-    def __init__(self, name: str, model_name: str):
-        assert model_name in ("lista", "alista")
-        self.name = name
-        self.model_name = model_name
+    def __init__(self, spec: ModelSpec):
+        self.spec = spec
+        self.name = spec.name
 
-    # ------------------------------------------------------------------ helpers
+    def _dialect(self, config: Dict[str, Any]):
+        problem = require(config, "problem", "{} requires config['problem']".format(self.name))
+        if problem != self.spec.problem:
+            raise NotImplementedError("{} solves problem {!r} only (got {!r})".format(
+                self.name, self.spec.problem, problem))
+        return get_dialect(problem, "unrolled", self.name)
 
     def _exp_name(self, config: Dict[str, Any]) -> str:
-        run_name = config.get("run_name")
-        if run_name:
-            return run_name
-        return "{}__{}".format(self.name, require(config, "problem",
-                                                  "{} requires config['problem']".format(self.name)))
+        return config.get("run_name") or "{}__{}".format(self.name, config["problem"])
 
     def _model_dir(self, base_dir: str, config: Dict[str, Any]) -> str:
         # adapters/model_based.py convention, so adapter checkpoints resolve as-is.
@@ -265,119 +213,71 @@ class UnifiedUnrolledMethod(L2OMethod):
             return base_dir
         return os.path.join(base_dir, "models", self._exp_name(config), "replicate_1")
 
-    def _identity(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        tr = config.get("train", {})
-        _check_keys(tr, _UNROLLED_TRAIN_KEYS, "{} config['train']".format(self.name))
-        return {
-            "num_layers": int(require(tr, "num_layers", "{} requires config['train']['num_layers']".format(self.name))),
-            "lasso_lam": float(require(tr, "lasso_lam", "{} requires config['train']['lasso_lam']".format(self.name))),
-            # train.py flag defaults
-            "model_lam": float(tr.get("model_lam", 0.4)),
-            "ss_q_per_layer": float(tr.get("ss_q_per_layer", 1.2)),
-            "ss_maxq": float(tr.get("ss_maxq", 13.0)),
-            "share_W": bool(tr.get("share_W", False)),
-        }
-
-    def _build(self, ident: Dict[str, Any], instances, create_cells: bool = True):
-        from unified.unrolled import build_model
-        return build_model(self.model_name, instances.a, ident["num_layers"], ident["model_lam"],
-                           w_alista=instances.w_alista, ss_q_per_layer=ident["ss_q_per_layer"],
-                           ss_maxq=ident["ss_maxq"], share_W=ident["share_W"], create_cells=create_cells)
+    def _train_section(self, config: Dict[str, Any], dialect) -> Dict[str, Any]:
+        schema = self.spec.train_schema.merge(dialect.train_schema)
+        return schema.validate(config.get("train", {}), "{} config['train']".format(self.name))
 
     # ------------------------------------------------------------------- train
 
     def train(self, config: Dict[str, Any], output_dir: str) -> TrainOutput:
-        from unified.curriculum import train_curriculum
-        from unified.instances import LassoInstances
-
-        tr = dict(config.get("train", {}))
-        ident = self._identity(config)
-        if tr.get("track_training_curve"):
-            raise NotImplementedError("{}: track_training_curve is not ported in the unified slice; "
-                                      "use the adapter-backed {}".format(self.name, self.model_name))
-        data_dir = require(tr, "data_dir", "{} requires config['train']['data_dir']".format(self.name))
+        dialect = self._dialect(config)
+        tr = self._train_section(config, dialect)
+        cfg = {**config, "train": tr}
+        ident = self.spec.identity(tr)
         base_dir = os.path.join(os.path.abspath(output_dir), "checkpoints")
         model_dir = os.path.join(base_dir, "models", self._exp_name(config), "replicate_1")
         os.makedirs(model_dir, exist_ok=True)
-        log_path = os.path.join(output_dir, "train.log")
-
-        _seed_everything(config.get("seed"))
-        train_instances = LassoInstances(data_dir, "train_data.npy")
-        val_instances = LassoInstances(data_dir, "val_data.npy")
-        model = self._build(ident, train_instances, create_cells=False)
-        with open(log_path, "w") as log_file:
-            def log(line):
-                log_file.write(line + "\n")
-                log_file.flush()
-            log("# in-process {} train: {}".format(self.name, json.dumps(tr, sort_keys=True, default=str)))
-            histories = train_curriculum(
-                model, train_instances, val_instances, model_dir,
-                lasso_lam=ident["lasso_lam"],
-                # train.py flag defaults: epochs 100000 (a cap), patience 8, base_lr 5e-4, batch 128
-                epochs=int(tr.get("epochs", 100000)), patience=int(tr.get("patience", 8)),
-                base_lr=float(tr.get("base_lr", 0.0005)),
-                train_batch_size=int(tr.get("train_batch_size", 128)),
-                val_batch_size=int(tr.get("val_batch_size", 1024)),
-                keras_train_loss=tr.get("keras_train_loss", "paper"), log=log)
+        log = _LogFile(os.path.join(output_dir, "train.log"),
+                       "# in-process {} train: {}".format(self.name, json.dumps(tr, sort_keys=True, default=str)))
+        try:
+            _seed_everything(config.get("seed"))
+            train_problem = dialect.train_problem(cfg)
+            val_problem = dialect.val_problem(cfg)
+            model = self.spec.build(train_problem, ident, False)
+            histories = self.spec.train(model, train_problem, val_problem, model_dir, tr, ident, log)
+        finally:
+            log.close()
         return TrainOutput(
             checkpoint=base_dir,
-            metrics={"model_dir": model_dir, "layers": histories,
-                     "final_val_lasso": histories[-1]["val_lasso"]},
-            artifacts={"train_log": log_path},
-            command="in-process {}".format(self.name),
-        )
+            metrics={"model_dir": model_dir, "layers": histories, "final_val_lasso": histories[-1]["val_lasso"]},
+            artifacts={"train_log": log.path}, command="in-process {}".format(self.name))
 
     # ---------------------------------------------------------------- evaluate
 
     def evaluate(self, config: Dict[str, Any], checkpoint: Optional[str],
                  output_dir: str) -> EvalOutput:
         from unified.evalwalk import evaluate_split, to_eval_output
-        from unified.instances import LassoInstances
-        from unified.objective import LassoObjective
-        from unified.unrolled import UnrolledSolver, load_layerwise_checkpoint
 
-        ev = dict(config.get("eval", {}))
-        _check_keys(ev, _UNROLLED_EVAL_KEYS, "{}.evaluate config['eval']".format(self.name))
-        ident = self._identity(config)
-        data_dir = ev.get("data_dir") or config.get("train", {}).get("data_dir")
-        if data_dir is None:
-            raise ValueError("{} requires config['eval']['data_dir']".format(self.name))
-        test_files: List[str] = list(ev.get("test_files") or [])
-        if not test_files:
-            raise ValueError("{} requires config['eval']['test_files']".format(self.name))
-        if "lasso_lam" in ev and float(ev["lasso_lam"]) != ident["lasso_lam"]:
-            logging.warning("%s: config['eval']['lasso_lam'] ignored; the identity field "
-                            "config['train']['lasso_lam']=%r is used", self.name, ident["lasso_lam"])
-        batch_size = int(ev.get("val_batch_size", 1024))
+        dialect = self._dialect(config)
+        tr = self._train_section(config, dialect)
+        ident = self.spec.identity(tr)
+        schema = self.spec.eval_schema.merge(dialect.eval_schema)
+        ev = schema.validate(config.get("eval", {}), "{}.evaluate config['eval']".format(self.name))
+        cfg = {**config, "train": tr, "eval": ev}
         if checkpoint is None:
             raise ValueError("{} has no classical path: evaluate needs a trained checkpoint".format(self.name))
         model_dir = self._model_dir(checkpoint, config)
+        num_layers = int(ident["num_layers"])
 
         _seed_everything(config.get("seed"))
+        labelled = dialect.eval_problems(cfg)
         eval_dir = os.path.join(os.path.abspath(output_dir), "eval")
         os.makedirs(eval_dir, exist_ok=True)
 
-        results, artifacts, model, a = [], {}, None, None
-        all_metrics = {}
-        for split in test_files:
-            instances = LassoInstances(data_dir, split)
-            a = instances.a if a is None else a
-            objective = LassoObjective(instances.a, ident["lasso_lam"])
-            if model is None:
-                model = self._build(ident, instances)
-                artifacts["checkpoint_keys"] = json.dumps(
-                    load_layerwise_checkpoint(model, model_dir, ident["num_layers"]))
-            solver = UnrolledSolver(model)
-            result = evaluate_split(lambda: solver, instances, objective, batch_size,
-                                    ident["num_layers"], reduction="sample_mean")
+        model = self.spec.build(labelled[0][1], ident, True)
+        artifacts = {"checkpoint_keys": json.dumps(self.spec.load_checkpoint(model, model_dir, num_layers))}
+        solver = self.spec.make_solver(model)
+        results, problems, all_metrics = [], [], {}
+        for label, problem in labelled:
+            result = evaluate_split(lambda: solver, problem, num_layers, "sample_mean", label=label)
             results.append(result)
-            base = split[:-len(".npy")]
+            problems.append(problem)
+            base = os.path.splitext(label)[0]
             np.save(os.path.join(eval_dir, base + "_final_output.npy"), result.x_pred)
-            all_metrics[split] = {"lasso_layer{}".format(i): v for i, v in enumerate(result.trajectory)}
-            artifacts["{}:final_output".format(split)] = os.path.join(eval_dir, base + "_final_output.npy")
+            all_metrics[label] = {"lasso_layer{}".format(i): v for i, v in enumerate(result.trajectory)}
+            artifacts["{}:final_output".format(label)] = os.path.join(eval_dir, base + "_final_output.npy")
         with open(os.path.join(eval_dir, "all_test_metrics.json"), "w") as f:
             json.dump(all_metrics, f, indent=2)
         artifacts["all_test_metrics"] = os.path.join(eval_dir, "all_test_metrics.json")
 
-        return to_eval_output(results, a, ident["lasso_lam"], ev.get("num_fista_iters"),
-                              ev.get("xstar_cache_dir"), artifacts, command="in-process {}".format(self.name))
+        return to_eval_output(results, problems, ev, artifacts, command="in-process {}".format(self.name))

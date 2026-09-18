@@ -263,3 +263,50 @@ def test_missing_checkpoint_is_refused(fixture_root, tmp_path):
               "eval": _tiny_eval(fixture, "L2L", {"beta1": 0.95, "beta2": 0.95})}
     with pytest.raises(FileNotFoundError):
         get_method("unified-rnnprop").evaluate(config, str(tmp_path / "nowhere"), str(tmp_path))
+
+
+# --------------------------------------------------------------------------
+# quadratic: the second problem (library-generated, no files) -- proves the
+# Problem abstraction. Same machine on both sides, so bit-exact.
+# --------------------------------------------------------------------------
+
+_QUAD_VARIANTS = [("rnnprop", {"beta1": 0.95, "beta2": 0.95}), ("dm", {})]
+
+
+def _quad_eval(optimizer, extra, num_steps=20, num_epochs=1):
+    return {"optimizer": optimizer, "num_steps": num_steps, "num_epochs": num_epochs, **extra}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("variant,extra", _QUAD_VARIANTS, ids=["rnnprop", "dm"])
+@pytest.mark.parametrize("num_epochs", [1, 3], ids=["1epoch", "3epochs"])
+def test_quadratic_classical_adam_parity(variant, extra, num_epochs, tmp_path):
+    """No files, no checkpoint: the trajectory over ``num_epochs`` library-generated
+    batches (per-step costs appended, as evaluate_dm.py does) must be bit-identical."""
+    adapter, uni = get_method("l2o-" + variant), get_method("unified-" + variant)
+    cfg = {"method": adapter.name, "problem": "quadratic", "seed": 7,
+           "eval": _quad_eval("Adam", extra, num_epochs=num_epochs)}
+    a_out = adapter.evaluate(cfg, None, os.path.join(str(tmp_path), "adapter"))
+    u_out = uni.evaluate(cfg, None, os.path.join(str(tmp_path), "unified"))
+    assert len(u_out.trajectory) == 20 * num_epochs
+    assert np.array_equal(np.asarray(a_out.trajectory), np.asarray(u_out.trajectory)), (
+        "max |diff| {:.3e}".format(float(np.max(np.abs(np.asarray(a_out.trajectory) - np.asarray(u_out.trajectory))))))
+    assert METRIC_KEY not in u_out.metrics     # nothing file-backed to fingerprint
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("variant,extra", _QUAD_VARIANTS, ids=["rnnprop", "dm"])
+def test_quadratic_tiny_adapter_checkpoint_parity(variant, extra, tmp_path):
+    """Train on quadratic through the EXISTING adapter, then evaluate the
+    checkpoint with both -- exercises the first-batch build/restore order on a
+    problem whose batches consume random numbers."""
+    adapter, uni = get_method("l2o-" + variant), get_method("unified-" + variant)
+    train = {"num_epochs": 2, "num_steps": 10, "unroll_length": 5, "evaluation_period": 1,
+             "evaluation_epochs": 1, "learning_rate": 1e-3, **extra}
+    ckpt = adapter.train({"method": adapter.name, "problem": "quadratic", "seed": 7, "train": train},
+                         os.path.join(str(tmp_path), "train")).checkpoint
+    cfg = {"method": adapter.name, "problem": "quadratic", "seed": 7, "eval": _quad_eval("L2L", extra)}
+    a_out = adapter.evaluate(cfg, ckpt, os.path.join(str(tmp_path), "adapter"))
+    u_out = uni.evaluate(cfg, ckpt, os.path.join(str(tmp_path), "unified"))
+    assert np.array_equal(np.asarray(a_out.trajectory), np.asarray(u_out.trajectory)), (
+        "max |diff| {:.3e}".format(float(np.max(np.abs(np.asarray(a_out.trajectory) - np.asarray(u_out.trajectory))))))

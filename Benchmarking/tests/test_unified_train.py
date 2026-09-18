@@ -45,11 +45,25 @@ def _logged_losses(path):
         return [l.strip() for l in f if l.startswith("training_loss=") or l.startswith("epoch=")]
 
 
+def _train_both_quadratic(variant, extra, tmp_path, seed=7):
+    train = {k: v for k, v in _TINY.items() if k != "lasso_batch_size"}
+    train.update(extra)
+    outs = {}
+    for name in ("l2o-" + variant, "unified-" + variant):
+        cfg = {"method": name, "problem": "quadratic", "seed": seed, "train": dict(train)}
+        outs[name] = get_method(name).train(cfg, os.path.join(str(tmp_path), name))
+    return outs
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("variant,extra", _VARIANTS, ids=_IDS)
-def test_same_seed_training_is_bit_identical(variant, extra, fixture_root, tmp_path):
-    fixture = make_lasso_tiny(fixture_root, 7)
-    outs = _train_both(variant, extra, fixture, tmp_path)
+@pytest.mark.parametrize("problem", ["lasso_dataset", "quadratic"])
+def test_same_seed_training_is_bit_identical(variant, extra, problem, fixture_root, tmp_path):
+    if problem == "quadratic":
+        outs = _train_both_quadratic(variant, extra, tmp_path)
+    else:
+        fixture = make_lasso_tiny(fixture_root, 7)
+        outs = _train_both(variant, extra, fixture, tmp_path)
     key = "rp" if variant == "rnnprop" else "cw"
     weights = {}
     for name, out in outs.items():
@@ -60,9 +74,12 @@ def test_same_seed_training_is_bit_identical(variant, extra, fixture_root, tmp_p
     for k in a:
         assert np.array_equal(a[k], u[k]), "tensor {} differs (max |diff| {:.3e})".format(
             k, float(np.abs(a[k] - u[k]).max()))
-    ra = np.load(os.path.join(outs["l2o-" + variant].checkpoint, "recovery.npz"))
-    ru = np.load(os.path.join(outs["unified-" + variant].checkpoint, "recovery.npz"))
-    assert np.array_equal(ra["x_pred"], ru["x_pred"]) and np.array_equal(ra["b"], ru["b"])
+    if problem == "lasso_dataset":
+        ra = np.load(os.path.join(outs["l2o-" + variant].checkpoint, "recovery.npz"))
+        ru = np.load(os.path.join(outs["unified-" + variant].checkpoint, "recovery.npz"))
+        assert np.array_equal(ra["x_pred"], ru["x_pred"]) and np.array_equal(ra["b"], ru["b"])
+    else:   # the scripts write no recovery.npz for problems without ground truth
+        assert not os.path.exists(os.path.join(outs["unified-" + variant].checkpoint, "recovery.npz"))
     assert _logged_losses(outs["l2o-" + variant].artifacts["train_log"]) == \
         _logged_losses(outs["unified-" + variant].artifacts["train_log"])
 

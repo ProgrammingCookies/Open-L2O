@@ -18,7 +18,7 @@ import pytest
 import adapters  # noqa: F401
 import unified  # noqa: F401
 from core.registry import get_method, list_methods
-from unified.instances import LassoInstances, x0_filename
+from unified.tasks.lasso import LassoProblem, x0_filename
 
 _LIB_MODULE_NAMES = ("networks", "problems", "util", "utils", "meta", "metaopt",
                      "optimizer", "preprocess", "evaluate", "train", "problem_generator")
@@ -67,14 +67,14 @@ def test_instances_walk_covers_split_once_in_order(tmp_path):
     np.save(os.path.join(tmp_path, "split.npy"), data)
     np.save(os.path.join(tmp_path, "split_x0.npy"), x0)
 
-    inst = LassoInstances(str(tmp_path), "split.npy")
-    batches = list(inst.walk(4))
-    assert [len(b.idx) for b in batches] == [4, 4, 2]
-    assert inst.num_chunks(4) == 3
-    seen = np.concatenate([b.idx for b in batches])
+    inst = LassoProblem(str(tmp_path), "split.npy", lam=0.005, batch_size=4)
+    batches = list(inst.walk())
+    assert [len(b.data["idx"]) for b in batches] == [4, 4, 2]
+    assert inst.num_chunks() == 3
+    seen = np.concatenate([b.data["idx"] for b in batches])
     assert np.array_equal(seen, np.arange(rows))
-    assert np.array_equal(np.concatenate([b.b for b in batches]), data[:, :m])
-    assert np.array_equal(np.concatenate([b.x_true for b in batches]), data[:, m:])
+    assert np.array_equal(np.concatenate([b.data["b"] for b in batches]), data[:, :m])
+    assert np.array_equal(np.concatenate([b.data["x_true"] for b in batches]), data[:, m:])
     assert np.array_equal(np.concatenate([b.x0 for b in batches]), x0)
 
 
@@ -83,8 +83,8 @@ def test_instances_requires_aligned_x0(tmp_path):
     np.save(os.path.join(tmp_path, "A.npy"), a)
     np.save(os.path.join(tmp_path, "s.npy"), np.zeros((4, 5), np.float32))
     with pytest.raises(FileNotFoundError):
-        LassoInstances(str(tmp_path), "s.npy")
-    assert LassoInstances(str(tmp_path), "s.npy", x0_mode="random").num_samples == 4
+        LassoProblem(str(tmp_path), "s.npy", lam=0.005, batch_size=2)
+    assert LassoProblem(str(tmp_path), "s.npy", lam=0.005, batch_size=2, x0_mode="random").num_samples == 4
 
 
 def test_model_free_config_rejects_unknown_eval_keys():
@@ -94,4 +94,13 @@ def test_model_free_config_rejects_unknown_eval_keys():
                          "eval": {"optimizer": "Adam", "num_steps": 1, "lasso_data_dir": ".",
                                   "made_up_flag": 1}}, None, "unused")
     with pytest.raises(NotImplementedError):
-        method.evaluate({"problem": "quadratic", "eval": {}}, None, "unused")
+        method.evaluate({"problem": "mnist", "eval": {}}, None, "unused")
+    with pytest.raises(ValueError, match="unrolled dialect"):
+        method.evaluate({"problem": "lasso", "eval": {}}, None, "unused")
+    with pytest.raises(NotImplementedError, match="if_cl"):
+        method.train({"problem": "lasso_dataset", "train": {"lasso_data_dir": ".", "num_epochs": 1,
+                                                             "if_cl": True}}, "unused")
+    with pytest.raises(ValueError, match="not accepted by this method"):
+        get_method("unified-dm").evaluate({"problem": "lasso_dataset",
+                                           "eval": {"optimizer": "Adam", "num_steps": 1, "lasso_data_dir": ".",
+                                                    "beta1": 0.9}}, None, "unused")

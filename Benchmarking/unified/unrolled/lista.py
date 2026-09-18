@@ -1,4 +1,4 @@
-"""LISTA / ALISTA as ``IterativeSolver``s: layer k IS iteration k.
+"""LISTA / ALISTA models (verbatim) + the ``IterativeSolver`` view of them: layer k IS iteration k.
 
 ``ListaCell``/``Lista``, ``AlistaCell``/``Alista`` and the two shrinkage
 functions are verbatim copies of ``Model_Base_L2O/models/{lista,alista,utils}.py``
@@ -7,31 +7,21 @@ variables in the same order as the ones that wrote Experiment 2's
 checkpoints -- which matters because of HOW those checkpoints hold the
 weights:
 
-``Model_Base_L2O/train.py`` saves ``tf.train.Checkpoint(model=model)``. Keras 3
-wraps list attributes (``theta``, ``_W``, ``step_size``) in a ``TrackedList``
-that TF's checkpointing does not descend into, so the per-layer weights are
-NOT stored under ``model/theta/...``. They reach the file only through the
-compiled optimizer's variable list, as
-``model/optimizer/_trainable_variables/<i>`` in ``model.trainable_variables``
-order (LISTA: ``[_W[1..T-1], theta[1..T], w_1]``, ALISTA:
-``[theta[1..T], step_size[1..T]]``); ``w_1`` is a bare attribute, so it
-appears once under the shorter path ``model/w_1``. ``load_layerwise_checkpoint``
-reads exactly that layout, with the count and shape checks the DM/RNNProp
-loader has, instead of relying on Keras rebuilding an optimizer to trigger a
-deferred restore.
+see ``loader.py`` for how the checkpoints hold the weights and why the
+verbatim variable order matters.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Dict, Iterator, List
+from typing import Iterator
 
 import numpy as np
 import tensorflow as tf
 import keras
 import tensorflow_probability as tfp
 
-from unified.instances import LassoBatch
+from unified.problem import Batch
 from unified.solver import IterativeSolver
 
 
@@ -306,61 +296,6 @@ def build_model(model_name: str, a: np.ndarray, num_layers: int, model_lam: floa
     return model
 
 
-_TV_KEY = "model/optimizer/_trainable_variables/{}/.ATTRIBUTES/VARIABLE_VALUE"
-_ATTR_KEY = "model/{}/.ATTRIBUTES/VARIABLE_VALUE"
-
-
-def layer_checkpoint_prefix(model_dir: str, num_layers: int) -> str:
-    """``<model_dir>/layer_<T>/model-<k>`` as ``utils.check_and_load_partial`` finds it."""
-    layer_dir = os.path.join(model_dir, "layer_{}".format(num_layers))
-    prefix = tf.train.latest_checkpoint(layer_dir)
-    if not prefix:
-        raise FileNotFoundError("no tf.train checkpoint under {} -- model not fully trained "
-                                "to {} layers".format(layer_dir, num_layers))
-    return prefix
-
-
-def load_layerwise_checkpoint(model, model_dir: str, num_layers: int) -> Dict[str, str]:
-    """Assign every trainable variable of ``model`` from the layer-``num_layers``
-    checkpoint; returns ``{variable name: checkpoint key}`` for inspection.
-    Raises if any variable has no entry or the shapes disagree."""
-    prefix = layer_checkpoint_prefix(model_dir, num_layers)
-    reader = tf.train.load_checkpoint(prefix)
-    shapes = reader.get_variable_to_shape_map()
-    # Bare Variable attributes are stored under their attribute path (the
-    # object graph keeps the first/shortest path to a shared object).
-    attr_paths = {}
-    for attr, value in vars(model).items():
-        if isinstance(value, keras.Variable):
-            attr_paths[id(value)] = _ATTR_KEY.format(attr)
-
-    variables: List[keras.Variable] = list(model.trainable_variables)
-    used: Dict[str, str] = {}
-    for i, v in enumerate(variables):
-        key = _TV_KEY.format(i)
-        if key not in shapes:
-            key = attr_paths.get(id(v), key)
-        if key not in shapes:
-            raise RuntimeError("{}: no entry for trainable variable {} ({!r}); checkpoint keys "
-                               "under model/: {}".format(prefix, i, v.name,
-                                                         sorted(k for k in shapes if k.startswith("model/"))[:8]))
-        value = reader.get_tensor(key)
-        if tuple(np.shape(value)) != tuple(v.shape):
-            raise RuntimeError("{}: {} has shape {} but variable {!r} has shape {}".format(
-                prefix, key, np.shape(value), v.name, tuple(v.shape)))
-        v.assign(value)
-        used[v.name] = key
-
-    # Same count discipline as nets_dm._assign_saved_weights: the file must
-    # hold exactly one trained tensor per model variable, no more.
-    n_indexed = sum(1 for k in shapes if k.startswith("model/optimizer/_trainable_variables/"))
-    n_attr = sum(1 for k in used.values() if not k.startswith("model/optimizer/"))
-    if n_indexed + n_attr != len(variables):
-        raise RuntimeError("{}: holds {} optimizer-tracked + {} attribute tensors but the model "
-                           "has {} trainable variables".format(prefix, n_indexed, n_attr, len(variables)))
-    return used
-
-
 class UnrolledSolver(IterativeSolver):
     """Runs the created cells one at a time, yielding x_k = the last N columns."""
 
@@ -369,13 +304,13 @@ class UnrolledSolver(IterativeSolver):
         self.num_layers = len(model.layers)
         self.n = model._N
 
-    def iterate(self, batch: LassoBatch, num_steps: int) -> Iterator:
+    def iterate(self, batch: Batch, num_steps: int) -> Iterator:
         if num_steps != self.num_layers:
             raise ValueError("an unrolled model has a fixed depth: num_steps={} but the model "
                              "has {} layers".format(num_steps, self.num_layers))
         # Model input is [b, x0] (data_preprocessing.dataset_parser); every cell
         # appends its output, so the last N columns are always the current iterate.
-        h = tf.concat([tf.constant(batch.b), tf.constant(batch.x0)], axis=1)
+        h = tf.concat([tf.constant(batch.data["b"]), tf.constant(batch.x0)], axis=1)
         yield h[:, -self.n:]
         for cell in self.model.layers:
             h = cell(h)

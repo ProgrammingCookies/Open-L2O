@@ -169,7 +169,7 @@ ENTRIES: List[Entry] = [
     Entry(
         name="quadratic",
         make_fixture=None,
-        methods={"l2o-rnnprop": _quadratic_rnnprop},
+        methods={"l2o-rnnprop": _quadratic_rnnprop, "unified-rnnprop": _quadratic_rnnprop},
         seed_selects_eval_instances=True,
         fingerprint_required=False,
     ),

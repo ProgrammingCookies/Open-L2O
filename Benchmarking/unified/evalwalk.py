@@ -1,137 +1,117 @@
-"""The one evaluation walk over a LASSO split.
+"""The one evaluation walk.
 
 Replaces the per-library evaluation loops (``evaluate_dm.py:83-152``,
 ``evaluate_rnnprop.py``, L2O-Scale ``evaluate.py::_evaluate_lasso_split``,
 and the layer-as-iteration read-back in ``adapters/model_based.py:246-293``)
-with one function that walks every row of a split exactly once, in file
-order, and records:
+with one function that runs a solver over every batch the problem's
+``walk()`` yields and records:
 
   * ``trajectory[k] = f(x_k)`` for k = 0 .. T-1  -- note x_T is NOT in the
     trajectory (the scripts record the objective *before* each step), and
-  * ``x_pred = x_T`` -- the iterate the Table-4 recovery metrics score.
+  * ``x_pred = x_T`` -- the iterate the problem's recovery metrics score.
 
-``reduction`` selects how per-chunk objective values are combined, because
-the two adapter families do it differently and parity requires matching:
+``reduction`` selects how per-batch objective values are combined, because
+the library scripts differ and parity requires matching:
   * ``"batch_mean"``: each chunk contributes its batch-mean objective; the
-    trajectory is the float64 mean over chunks (model-free scripts, which
-    also gives the last, possibly smaller, chunk equal weight).
+    trajectory is the float64 mean over chunks (model-free LASSO scripts,
+    which also gives the last, possibly smaller, chunk equal weight).
+  * ``"concat"``: every chunk's per-step costs appended (``evaluate_dm.py``'s
+    non-LASSO branch: ``loss_record.extend``).
   * ``"sample_mean"``: Keras ``Mean``-metric semantics -- float32 running
     sum of per-sample objectives / float32 count (Model_Base ``train.py``).
+
+``on_first_batch`` runs once, on the first batch, before the solver touches
+it: the scripts build the network on the first problem instance and *then*
+restore weights, and for library-generated problems that order is what
+keeps the random-number stream identical.
 """
 
 from __future__ import annotations
 
-import os
-import pickle
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
-from core.fingerprint import METRIC_KEY as FINGERPRINT_KEY, fingerprint_arrays
-from core.lasso_metrics import evaluate_lasso_recovery
+from core.fingerprint import METRIC_KEY as FINGERPRINT_KEY
 from core.result import EvalOutput, summarize_trajectory
-from unified.instances import LassoInstances
-from unified.objective import LassoObjective
+from unified.problem import Batch, Problem
 from unified.solver import IterativeSolver
 
 
 @dataclass
 class SplitResult:
-    split: str
+    label: str
     trajectory: List[float]
     x_pred: np.ndarray
-    b: np.ndarray
-    x_true: np.ndarray
-    x0: np.ndarray
-
-    def fingerprint(self) -> Dict:
-        return fingerprint_arrays(b=self.b, x_true=self.x_true, x0=self.x0)
+    batches: List[Batch] = field(default_factory=list)   # in walk order
 
 
-def evaluate_split(make_solver: Callable[[], IterativeSolver], instances: LassoInstances,
-                   objective: LassoObjective, batch_size: int, num_steps: int,
-                   reduction: str = "batch_mean") -> SplitResult:
+def evaluate_split(make_solver: Callable[[], IterativeSolver], problem: Problem, num_steps: int,
+                   reduction: str, label: str = "", on_first_batch: Optional[Callable[[Batch], None]] = None
+                   ) -> SplitResult:
     import tensorflow as tf
 
-    if reduction not in ("batch_mean", "sample_mean"):
-        raise ValueError("reduction must be 'batch_mean' or 'sample_mean', got {!r}".format(reduction))
+    if reduction not in ("batch_mean", "concat", "sample_mean"):
+        raise ValueError("reduction must be 'batch_mean', 'concat' or 'sample_mean', got {!r}".format(reduction))
 
-    num_chunks = instances.num_chunks(batch_size)
     sum_costs = np.zeros(num_steps, dtype=np.float64)
+    concat: List[float] = []
     sum_per_sample = [tf.zeros((), tf.float32) for _ in range(num_steps)]
     count = tf.zeros((), tf.float32)
-    x_pred_chunks, b_chunks, x_true_chunks, x0_chunks = [], [], [], []
+    x_pred_chunks, batches = [], []
 
-    for batch in instances.walk(batch_size):
+    for i, batch in enumerate(problem.walk()):
+        if i == 0 and on_first_batch is not None:
+            on_first_batch(batch)
         solver = make_solver()
         solver.new_run()
-        b = tf.constant(batch.b)
         costs = []
         x_final = None
         for k, x_k in enumerate(solver.iterate(batch, num_steps)):
             if k < num_steps:
-                if reduction == "batch_mean":
-                    costs.append(float(objective.batch_mean(x_k, b)))
+                if reduction == "sample_mean":
+                    sum_per_sample[k] = sum_per_sample[k] + tf.reduce_sum(problem.per_sample(x_k, batch))
                 else:
-                    sum_per_sample[k] = sum_per_sample[k] + tf.reduce_sum(
-                        objective.per_sample(x_k, b))
+                    costs.append(float(problem.objective(x_k, batch)))
             else:
                 x_final = x_k
         if x_final is None:
             raise RuntimeError("solver yielded fewer than num_steps + 1 iterates")
         if reduction == "batch_mean":
             sum_costs += np.array(costs, dtype=np.float64)
+        elif reduction == "concat":
+            concat.extend(costs)
         else:
-            count = count + tf.cast(tf.shape(b)[0], tf.float32)
+            count = count + tf.cast(tf.shape(batch.x0)[0], tf.float32)
         x_pred_chunks.append(np.asarray(x_final))
-        b_chunks.append(batch.b)
-        x_true_chunks.append(batch.x_true)
-        x0_chunks.append(batch.x0)
+        batches.append(batch)
 
     if reduction == "batch_mean":
-        trajectory = (sum_costs / num_chunks).tolist()
+        trajectory = (sum_costs / problem.num_chunks()).tolist()
+    elif reduction == "concat":
+        trajectory = list(concat)
     else:
         trajectory = [float(s / count) for s in sum_per_sample]
-
-    return SplitResult(
-        split=instances.split, trajectory=trajectory,
-        x_pred=np.concatenate(x_pred_chunks, axis=0),
-        b=np.concatenate(b_chunks, axis=0),
-        x_true=np.concatenate(x_true_chunks, axis=0),
-        x0=np.concatenate(x0_chunks, axis=0))
+    return SplitResult(label=label, trajectory=trajectory,
+                       x_pred=np.concatenate(x_pred_chunks, axis=0), batches=batches)
 
 
-def split_metrics(result: SplitResult, a: np.ndarray, lam: float,
-                  num_fista_iters: Optional[int], xstar_cache_dir: Optional[str]) -> Dict:
-    """summarize_trajectory + fingerprint + the four Table-4 recovery metrics."""
+def split_metrics(result: SplitResult, problem: Problem, eval_section: Dict) -> Dict:
+    """summarize_trajectory + the problem's fingerprint and recovery metrics (if any)."""
     metrics = summarize_trajectory(result.trajectory)
-    metrics[FINGERPRINT_KEY] = result.fingerprint()
-    if num_fista_iters is not None:
-        metrics.update(evaluate_lasso_recovery(
-            a, result.b, result.x_true, result.x_pred, lam,
-            num_fista_iters=num_fista_iters, xstar_cache_dir=xstar_cache_dir).to_dict())
+    fingerprint = problem.fingerprint(result.batches)
+    if fingerprint is not None:
+        metrics[FINGERPRINT_KEY] = fingerprint
+    metrics.update(problem.recovery_metrics(result.batches, result.x_pred, eval_section))
     return metrics
 
 
-def write_model_free_artifacts(result: SplitResult, output_path: str,
-                               optimizer_tag: str, problem: str = "lasso_dataset") -> Dict[str, str]:
-    """Same files/layout as evaluate_{dm,rnnprop}.py so parity can diff artifacts."""
-    os.makedirs(output_path, exist_ok=True)
-    pickle_path = os.path.join(output_path, "{}_eval_loss_record.pickle-{}".format(optimizer_tag, problem))
-    with open(pickle_path, "wb") as f:
-        pickle.dump(list(result.trajectory), f)
-    recovery_path = os.path.join(output_path, "{}_recovery-{}.npz".format(optimizer_tag, problem))
-    np.savez(recovery_path, x_pred=result.x_pred, x_true=result.x_true, b=result.b, x0=result.x0)
-    return {"eval_pickle": pickle_path, "recovery": recovery_path}
-
-
-def to_eval_output(results: List[SplitResult], a: np.ndarray, lam: float,
-                   num_fista_iters: Optional[int], xstar_cache_dir: Optional[str],
+def to_eval_output(results: List[SplitResult], problems: List[Problem], eval_section: Dict,
                    artifacts: Dict[str, str], command: Optional[str] = None) -> EvalOutput:
-    """First split = headline metrics/trajectory; every split under ``per_seed[filename]``
+    """First split = headline metrics/trajectory; every split under ``per_seed[label]``
     (the model-based adapter's convention that experiment2's fan-out reads)."""
-    per_seed = {r.split: split_metrics(r, a, lam, num_fista_iters, xstar_cache_dir) for r in results}
+    per_seed = {r.label: split_metrics(r, p, eval_section) for r, p in zip(results, problems)}
     head = results[0]
-    return EvalOutput(metrics=dict(per_seed[head.split]), trajectory=list(head.trajectory),
+    return EvalOutput(metrics=dict(per_seed[head.label]), trajectory=list(head.trajectory),
                       per_seed=per_seed, artifacts=artifacts, command=command)

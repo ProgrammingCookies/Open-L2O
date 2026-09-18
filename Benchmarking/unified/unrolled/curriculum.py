@@ -37,7 +37,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 import tensorflow as tf
 
-from unified.instances import LassoInstances
+from unified.tasks.lasso import LassoProblem
 
 
 # ----------------------------------------------------------- Model_Base utils.py
@@ -125,10 +125,10 @@ class Adam(tf.keras.optimizers.Adam):
 
 # ------------------------------------------------- Model_Base data_preprocessing.py
 
-def make_dataset(instances: LassoInstances, batch_size: int, is_training: bool) -> tf.data.Dataset:
+def make_dataset(problem: LassoProblem, batch_size: int, is_training: bool) -> tf.data.Dataset:
     """``input_fn`` for task='lasso': records ``[b; x_true; x0]`` -> (input ``[b, x0]``, label ``[b, x_true]``)."""
-    m, n = instances.m, instances.n
-    data = np.concatenate([instances._data, instances._x0], axis=1)
+    m, n = problem.m, problem.n
+    data = np.concatenate([problem._data, problem._x0], axis=1)
 
     def dataset_parser(value):
         inputs = tf.concat([value[:m], value[m + n:]], axis=-1)
@@ -149,7 +149,7 @@ def make_dataset(instances: LassoInstances, batch_size: int, is_training: bool) 
 
 # ------------------------------------------------------------------ curriculum
 
-def train_curriculum(model, train_instances: LassoInstances, val_instances: LassoInstances,
+def train_curriculum(model, train_instances: LassoProblem, val_instances: LassoProblem,
                      model_dir: str, *, lasso_lam: float, epochs: int, patience: int, base_lr: float,
                      train_batch_size: int, val_batch_size: int = 1024,
                      keras_train_loss: str = "paper", log: Callable[[str], None] = print,
