@@ -30,6 +30,15 @@ def pytest_addoption(parser):
         "--group-by", action="store", default=None,
         help="Comma-separated row fields that identify one cell of that sweep, excluding "
              "'method' (e.g. seed,width,test_sparsity). Inferred from the rows if omitted.")
+    parser.addoption(
+        "--parity-steps", action="store", default=100, type=int,
+        help="test_unified_parity.py: how many trajectory points of a stored real-run eval to "
+             "reproduce (default 100; 1000 = full trajectory + x_pred, ~5 min CPU per method).")
+
+
+@pytest.fixture(scope="session")
+def parity_steps(request):
+    return request.config.getoption("--parity-steps")
 
 
 @pytest.fixture(scope="session")

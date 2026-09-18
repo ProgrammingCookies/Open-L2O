@@ -173,6 +173,24 @@ ENTRIES: List[Entry] = [
         seed_selects_eval_instances=True,
         fingerprint_required=False,
     ),
+    # The in-process unified-* methods (Benchmarking/unified) on the same tiny
+    # LASSO fixture, with one adapter-backed method as the reference so Tier B
+    # proves the two code paths score the very same instances. Kept as a
+    # separate entry so the adapter-only ``lasso_tiny`` results stay comparable
+    # across time.
+    Entry(
+        name="lasso_tiny_unified",
+        make_fixture=make_lasso_tiny,
+        methods={
+            "l2o-rnnprop": _lasso_rnnprop,
+            "unified-rnnprop": _lasso_rnnprop,
+            "unified-dm": _lasso_dm,
+            "unified-lista": _lasso_model_based,
+            "unified-alista": _lasso_model_based,
+        },
+        seed_selects_eval_instances=False,
+        fingerprint_required=True,
+    ),
 ]
 
 

@@ -6,6 +6,7 @@ import os
 from typing import Any, Dict, Optional
 
 import adapters  # noqa: F401  -- registers every method
+import unified  # noqa: F401  -- registers the in-process unified-* methods
 from core.registry import get_method
 from core.result import EvalOutput
 from tests.fairness_matrix import Entry, Fixture
