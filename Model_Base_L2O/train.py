@@ -235,14 +235,21 @@ def run(
     res_dict = {}
     eval_files = FLAGS.test_files
 
-    if task == 'lasso':
-      # do layer-wise testing
-      test_metrics = [
-        utils.LassoObjective('lasso_layer{}'.format(i), _A_const, FLAGS.lasso_lam, M, N, i)
-        for i in range(FLAGS.num_layers)
-      ]
-    else:
-      test_metrics = [
+    def make_test_metrics():
+      # Fresh metric objects for EVERY test file. These are Keras ``Mean``
+      # metrics; when one list was built once and handed to compile()/evaluate()
+      # for each file in turn, Keras 3 did not reset their running totals
+      # between files, so the reported value for the k-th file was the
+      # cumulative mean over files 1..k (found 2026-09-17). Any per-layer
+      # trajectory recorded before this fix is a running mean, not a per-file
+      # value, and has to be recomputed from the checkpoints.
+      if task == 'lasso':
+        # do layer-wise testing
+        return [
+          utils.LassoObjective('lasso_layer{}'.format(i), _A_const, FLAGS.lasso_lam, M, N, i)
+          for i in range(FLAGS.num_layers)
+        ]
+      return [
           utils.EvalNMSE('nmse_layer{}'.format(i), M, N, output_interval, i)
           for i in range(FLAGS.num_layers)
       ]
@@ -264,7 +271,7 @@ def run(
       model.compile(
           optimizer=tf.keras.optimizers.Adam(_BASE_LR),
           loss=loss,
-          metrics=test_metrics)
+          metrics=make_test_metrics())
 
 
       metrics_dict = {name: float(value) for name, value in

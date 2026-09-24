@@ -240,6 +240,9 @@ def main():
             dummy_grads = problem.gradients(dummy_obj, dummy_params, tape)
             opt.apply_gradients(zip(dummy_grads, dummy_params))
             opt.load(checkpoint_path)
+            # Killing dummy variable so it is not silently inherited by the real run
+            for v in dummy_params:
+                opt._slots.pop(id(v), None)
         else:
             print("WARNING: no checkpoint found at {}, evaluating untrained optimizer".format(
                 checkpoint_path))
