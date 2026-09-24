@@ -48,16 +48,16 @@ Outputs:
   Figs/experiment2/width_tradeoff_nmse_<run>_<method>.png   the same
       panels as standalone images (shared y-range, no title) for a LaTeX
       multi-panel figure
-  Benchmarking/experiment2_width_tradeoff_figure.tex   subfigure snippet
+  Figs/multifigure/experiment2_width_tradeoff_figure.tex   subfigure snippet
       referencing those images (needs the subcaption package); input it
-  Benchmarking/experiment2_width_tradeoff_table.tex   the numbers
+  Figs/tables/experiment2_width_tradeoff_table.tex   the numbers
   stdout: the same table in markdown plus the raw-NMSE-at-fixed-p variant
       used in the 2026-09-06 cross-run analysis, for continuity.
 
 Runs with fewer than MIN_SEEDS seeds for a method are skipped (a paired test
 on 2 seeds is not a result); re-run as exp2_try3_210x300 fills in.
 
-Usage: python plot_experiment2_width_tradeoff.py
+Usage: python analysis/plot_experiment2_width_tradeoff.py
 """
 
 from __future__ import annotations
@@ -69,19 +69,43 @@ from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+import sys
+
+# Benchmarking/ is this file's parent, not its own directory, so it is not on
+# sys.path automatically when this runs as `python analysis/<script>.py`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import run_specs
+
+from core.seedsets import filter_to_complete_seeds
 from scipy import stats
 
 THESIS_FIGS_DIR = os.path.join("..", "Figs", "experiment2")
-OUT_TEX = "experiment2_width_tradeoff_table.tex"
-OUT_FIG_TEX = "experiment2_width_tradeoff_figure.tex"
+TABLES_DIR = os.path.join("..", "Figs", "tables")  # all result tables live here
+OUT_TEX = os.path.join(TABLES_DIR, "experiment2_width_tradeoff_table.tex")
+MULTIFIG_DIR = os.path.join("..", "Figs", "multifigure")  # all subfigure snippets live here
+OUT_FIG_TEX = os.path.join(MULTIFIG_DIR, "experiment2_width_tradeoff_figure.tex")
 MIN_SEEDS = 5
 
-RUNS = [
-    # (run key, label, m, n, noise label)
-    ("exp2_try2", r"$(25,50)$, noiseless, centred widths", 25, 50),
-    ("exp2_try3_210x300", r"$(210,300)$, noiseless, centred widths", 210, 300),
-    ("exp2_real", r"$(210,300)$, SNR 40 dB, uncentred widths", 210, 300),
-]
+# Run identity -- results paths, dimensions, method lists, width triads --
+# comes from the shared registry, so a run is defined in exactly one place.
+# The ORDER of the keys below and the subtitle wording are presentation,
+# and stay local: the order fixes panel/figure order in this script's own
+# output, and each script phrases the run differently.
+_LABELS = {
+    "exp2_try2": r"$(25,50)$, noiseless, centred widths",
+    "exp2_try3_210x300": r"$(210,300)$, noiseless, centred widths",
+    # LISTA/ALISTA retrained on the scored objective (lasso_train_objective ablation);
+    # see plot_experiment2_width_ratio_rf.py's comment for why the paper arm
+    # understates the ID cost this figure reports.
+    "exp2_try3_210x300_scoringonly": r"$(210,300)$, noiseless, centred widths, scoring loss",
+    "exp2_real": r"$(210,300)$, SNR 40 dB, uncentred widths",
+}
+# (run key, label, m, n) -- dims read from the registry, not restated here.
+RUNS = [(k, _LABELS[k], run_specs.RUN_SPECS[k].m, run_specs.RUN_SPECS[k].n)
+        for k in ["exp2_try2", "exp2_try3_210x300",
+                  "exp2_try3_210x300_scoringonly", "exp2_real"]]
 METHODS = [("lista", "LISTA"), ("alista", "ALISTA")]
 WIDTHS = ["narrow", "medium", "wide"]
 COMPARISONS = [("wide", "narrow", "wide $-$ narrow", "#1baf7a", "-"),
@@ -116,6 +140,11 @@ def width_centres(run_dir: str, seed: int) -> Dict[str, float]:
 def load_curves(run_dir: str):
     """{(method, width, seed): (p array, excess-over-floor array, raw NMSE array)}"""
     rows = [json.loads(l) for l in open(os.path.join(run_dir, "results.jsonl")) if l.strip()]
+    # Only seeds present in EVERY (method, width) cell: a sweep stopped
+    # mid-seed otherwise aggregates one method over N seeds and another
+    # over N-1 (see core/seedsets.py).
+    rows, _, _ = filter_to_complete_seeds(rows, methods=("lista", "alista"),
+                                         label=run_dir)
     acc: Dict[Tuple[str, str, int], List[Tuple[float, float, float]]] = defaultdict(list)
     for r in rows:
         if r["method"] not in ("lista", "alista"):
@@ -314,7 +343,7 @@ def main():
         "% plot_experiment2_width_tradeoff.py. Requires \\usepackage{graphicx} and",
         "% \\usepackage{subcaption}. Paths are relative to the repo root (Figs/...);",
         "% adjust \\graphicspath or the paths below to match the Overleaf project.",
-        "% Include with: \\input{experiment2_width_tradeoff_figure}",
+        "% Include with: \\input{Figs/multifigure/experiment2_width_tradeoff_figure}",
         r"\begin{figure}[htbp]", r"\centering"]
     for i, (name, cap, lab) in enumerate(sub_entries):
         fig_lines += [r"\begin{subfigure}[t]{0.48\linewidth}", r"  \centering",
@@ -332,6 +361,7 @@ def main():
         r"Dotted verticals mark the offsets reported in Table~\ref{tab:exp2-width-tradeoff}. Points where a "
         r"width is in the exact-recovery regime (raw NMSE below $-60$ dB) are omitted.}",
         r"\label{fig:exp2-width-tradeoff}", r"\end{figure}"]
+    os.makedirs(MULTIFIG_DIR, exist_ok=True)
     with open(OUT_FIG_TEX, "w", encoding="utf-8") as f:
         f.write("\n".join(fig_lines) + "\n")
     print("wrote", OUT_FIG_TEX)
@@ -366,6 +396,7 @@ def main():
               r"regime there (raw NMSE below $-60$ dB), where the dB difference is numerical noise. Generated by \texttt{plot\_experiment2\_width\_tradeoff.py} "
               r"from \texttt{results.jsonl}; runs with fewer than " + str(MIN_SEEDS) + " complete seeds are omitted.",
               r"\end{minipage}", r"\end{table}"]
+    os.makedirs(TABLES_DIR, exist_ok=True)
     with open(OUT_TEX, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print("wrote", OUT_TEX)

@@ -28,24 +28,31 @@ No new GPU work. Inputs already on disk:
 Outputs:
   Figs/<run>/compute_matched_rf_<run>.png   R_f vs. iteration, one panel
       per test sparsity, shared log axes; RNNProp per width (median over
-      seeds), ISTA / FISTA, and LISTA-16 / ALISTA-16 as guide lines.
+      seeds), ISTA / FISTA, LISTA / ALISTA per layer k = 1..16 (one thin
+      curve per training width, from the regenerated per-file metrics) ending
+      at the 16-layer marker, whose value is also drawn as a guide line.
   Figs/<run>/iterations_to_match_<run>.png   iterations RNNProp (per
       width) and FISTA need to first reach the 16-layer LISTA / ALISTA R_f,
       vs. test sparsity (combined two-panel overview).
   Figs/<run>/iterations_to_match_<run>_{lista,alista}.png   the same two
       panels as standalone images, plus
-  Benchmarking/iterations_to_match_<run>_figure.tex   a subcaption snippet
+  Figs/multifigure/iterations_to_match_<run>_figure.tex   a subcaption snippet
       referencing them (input it from the thesis; needs subcaption).
   Benchmarking/compute_matched_<run>.md   the numbers behind both figures.
 
 Usage:
-  python plot_compute_matched_rf.py --run exp2_try2
-  python plot_compute_matched_rf.py --run exp2_try3_210x300
+  python analysis/plot_compute_matched_rf.py --run exp2_try2
+  python analysis/plot_compute_matched_rf.py --run exp2_try3_210x300
+  python analysis/plot_compute_matched_rf.py --run exp2_try3_210x300 --overlay none
+      -> compute_matched_rf_<run>_rnnprop_only.png: the RNNProp curves alone,
+         for the "flattens by ~300 steps and is identical across widths"
+         statement; --overlay classical adds ISTA/FISTA (_classical.png).
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import pickle
@@ -56,11 +63,18 @@ from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Benchmarking/ is this file's parent, not its own directory, so it is not on
+# sys.path automatically when this runs as `python analysis/<script>.py`. This
+# must precede every core.*/data.* import below.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import run_specs  # noqa: E402
+from core.seedsets import filter_to_complete_seeds  # noqa: E402
 from core.lasso_metrics import _GAP_TOL, _xstar_cache_path, lasso_objective  # noqa: E402
 from data.lasso import _test_filename  # noqa: E402
 
 THESIS_FIGS_DIR = os.path.join("..", "Figs")
+MULTIFIG_DIR = os.path.join(THESIS_FIGS_DIR, "multifigure")  # all subfigure snippets live here
 NUM_FISTA_ITERS = 50_000  # every Experiment-2 run's x* budget (cache keys verified)
 
 # Same width palette as every other Experiment-2 figure (blue / orange / aqua).
@@ -86,11 +100,17 @@ BUDGETS = (16, 100, 1000)
 # "converged" for the purposes of the comparison, and the caption says so.
 RF_FLOOR = 1e-5
 
-RUNS = {
-    "exp2_try2": {"subtitle": r"$(m,n) = (25, 50)$, noiseless, centred widths"},
-    "exp2_try3_210x300": {"subtitle": r"$(m,n) = (210, 300)$, noiseless, centred widths"},
-    "exp2_real": {"subtitle": r"$(m,n) = (210, 300)$, SNR 40 dB, uncentred widths"},
-}
+# Run identity -- results paths, dimensions, method lists, width triads --
+# comes from the shared registry, so a run is defined in exactly one place.
+# The ORDER of the keys below and the subtitle wording are presentation,
+# and stay local: the order fixes panel/figure order in this script's own
+# output, and each script phrases the run differently.
+_ORDER = ["exp2_try2", "exp2_try3_210x300", "exp2_real",
+          # Model-based only (LISTA / ALISTA re-trained with the
+          # scoring-consistent loss); has no model-free rows, so only the
+          # model-based readers below and plot_modelbased_seed_curves.py use it.
+          "exp2_try3_210x300_scoringonly"]
+RUNS = {k: {"subtitle": run_specs.RUN_SPECS[k].subtitle} for k in _ORDER}
 
 
 def _eval_dirname(p: float) -> str:
@@ -191,6 +211,54 @@ def model_based_rf(rows: List[dict]) -> Dict[Tuple[str, str, float], float]:
     return {k: float(np.median(v)) for k, v in acc.items()}
 
 
+def model_based_layer_curves(run_dir: str, rows: List[dict], lam: float, m: int
+                             ) -> Dict[Tuple[str, str, float], np.ndarray]:
+    """{(method, width, p): R_f[k] median over seeds, k = 0..16} for lista / alista.
+
+    k = 0 is f(x0) (the shared seeded start), k = i the output of layer i.
+    Source: each cell's `all_test_metrics_perfile.json` (`lasso_layer{i}` =
+    objective of the iterate after i layers, i = 0..15 -- layer_id i slices
+    y_pred = [b, x0, x1, ..., x16] at M + i*N, so index 0 is x0), written by
+    `regenerate_modelbased_trajectories.py` after the 2026-09-17 fix (the
+    library's own per-layer values were running means across test files and
+    are NOT usable). k = 16 is the row's own `modified_relative_loss`, which
+    is scored on the same final iterate. Cells without the regenerated file
+    are skipped (a warning is printed) so a partially regenerated run still
+    plots what it has.
+    """
+    per_cell: Dict[Tuple[str, str, float], List[np.ndarray]] = defaultdict(list)
+    fstar_cache: Dict[Tuple[int, float], float] = {}
+    missing = 0
+    for r in rows:
+        if r["method"] not in ("lista", "alista"):
+            continue
+        seed, width, p = int(r["seed"]), r["width"], float(r["test_sparsity"])
+        pattern = os.path.join(run_dir, "checkpoints", "s{}".format(seed), width, r["method"],
+                               "checkpoints", "models", "*", "replicate_1", "all_test_metrics_perfile.json")
+        hits = glob.glob(pattern)
+        if not hits:
+            missing += 1
+            continue
+        with open(hits[0]) as f:
+            per_file = json.load(f)
+        vals = per_file.get(_test_filename(p))
+        if vals is None:
+            missing += 1
+            continue
+        key = (seed, p)
+        if key not in fstar_cache:
+            fstar_cache[key] = mean_fstar(run_dir, seed, p, lam, m)
+        f_star = fstar_cache[key]
+        layers = [vals["lasso_layer{}".format(i)] for i in range(MODEL_BASED_DEPTH)]
+        rf = np.array(layers, dtype=np.float64) / f_star - 1.0
+        rf = np.append(rf, float(r["modified_relative_loss"]))   # k = 16
+        per_cell[(r["method"], width, p)].append(rf)
+    if missing:
+        print("  {} model-based cells lack all_test_metrics_perfile.json -- run "
+              "regenerate_modelbased_trajectories.py --run {} for full per-layer curves".format(missing, run_dir))
+    return {k: np.median(np.stack(v), axis=0) for k, v in per_cell.items()}
+
+
 def first_reach(curve: np.ndarray, target: float) -> Optional[int]:
     hit = np.nonzero(curve <= target)[0]
     return int(hit[0]) if hit.size else None
@@ -227,11 +295,23 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True, choices=sorted(RUNS))
     ap.add_argument("--method", default="l2o-rnnprop")
+    ap.add_argument("--overlay", choices=["none", "classical", "full"], default="full",
+                    help="what to draw besides the RNNProp curves in the R_f-vs-iteration figure: "
+                         "'none' = RNNProp only (the width-invariance / plateau figure), "
+                         "'classical' = + ISTA/FISTA, 'full' = + LISTA/ALISTA per-layer curves and "
+                         "16-layer markers (the compute-matched figure). Output name gets a suffix "
+                         "for the reduced variants; the iterations-to-match figure and tables are unaffected.")
     args = ap.parse_args()
 
     run_key = args.run
     run_dir = os.path.join("runs", run_key)
     rows = load_results(run_dir)
+    # Only seeds present in EVERY (method, width) cell: the matched-budget
+    # comparison is model-free vs model-based, so an incomplete seed would put
+    # the two sides of that comparison on different seed sets
+    # (see core/seedsets.py).
+    rows, _, _ = filter_to_complete_seeds(
+        rows, methods=[args.method, "lista", "alista"], label=run_dir)
     seeds_all = sorted({int(r["seed"]) for r in rows})
     with open(os.path.join(run_dir, "data", "seed{}".format(seeds_all[0]), "metadata.json")) as f:
         meta = json.load(f)
@@ -245,6 +325,7 @@ def main() -> None:
     rf_mf = rnnprop_rf_curves(run_dir, rows, lam, m, args.method)
     rf_cl = classical_curves(run_dir, seeds_all, ps, lam, m)
     rf_mb = model_based_rf(rows)
+    rf_mb_layers = model_based_layer_curves(run_dir, rows, lam, m)
     if not rf_mf:
         print("  no valid {} rows in {} -- plotting classical + model-based only".format(args.method, run_dir))
     if not rf_cl:
@@ -278,7 +359,8 @@ def main() -> None:
     k_axis = np.arange(n_steps)
     for ax, p in zip(axes, ps):
         style_axes(ax)
-        for method, label, color, ls in (("ista", "ISTA", ISTA_C, "-"), ("fista", "FISTA", FISTA_C, "-")):
+        for method, label, color, ls in ((("ista", "ISTA", ISTA_C, "-"), ("fista", "FISTA", FISTA_C, "-"))
+                                         if args.overlay != "none" else ()):
             c = rf_cl.get((method, p))
             if c is not None:
                 kk = np.arange(len(c))
@@ -289,11 +371,23 @@ def main() -> None:
             if c is not None:
                 (h,) = ax.plot(k_axis[1:], np.maximum(c[1:n_steps], RF_FLOOR), color=color, lw=2, ls=ls, zorder=3)
                 handles["RNNProp, {} width".format(label.lower())] = h
-        for method, label, color, marker in (("lista", "LISTA (16 layers)", LISTA_C, "s"),
-                                             ("alista", "ALISTA (16 layers)", ALISTA_C, "D")):
+        for method, label, color, marker in ((("lista", "LISTA (16 layers)", LISTA_C, "s"),
+                                              ("alista", "ALISTA (16 layers)", ALISTA_C, "D"))
+                                             if args.overlay == "full" else ()):
             vals = [rf_mb[(method, w, p)] for w, _, _, _ in WIDTHS if (method, w, p) in rf_mb]
             if not vals:
                 continue
+            # Per-layer trajectory, k = 1..16, one thin curve per training width
+            # (same linestyle-per-width convention as the RNNProp curves), ending
+            # at the marker. k = 0 is f(x0), identical for every method, and is
+            # off the log x-axis anyway.
+            for wkey, _, _, wls in WIDTHS:
+                c = rf_mb_layers.get((method, wkey, p))
+                if c is not None:
+                    kk = np.arange(1, len(c))
+                    (hl,) = ax.plot(kk, np.maximum(c[1:], RF_FLOOR), color=color, lw=1.2, ls=wls,
+                                    alpha=0.85, zorder=3)
+                    handles.setdefault(label.replace("(16 layers)", "per layer, one curve per width"), hl)
             med = float(np.median(vals))
             ax.axhline(med, color=color, lw=1, ls=(0, (2, 2)), zorder=1)
             ax.plot([MODEL_BASED_DEPTH, MODEL_BASED_DEPTH], [min(vals), max(vals)], color=color, lw=1.5, zorder=4)
@@ -307,7 +401,9 @@ def main() -> None:
         ax.axis("off")
     legend_ax = axes[len(ps)] if len(ps) < len(axes) else None
     order = [l for l in ("RNNProp, narrow width", "RNNProp, medium width", "RNNProp, wide width",
-                         "FISTA", "ISTA", "LISTA (16 layers)", "ALISTA (16 layers)") if l in handles]
+                         "FISTA", "ISTA",
+                         "LISTA per layer, one curve per width", "LISTA (16 layers)",
+                         "ALISTA per layer, one curve per width", "ALISTA (16 layers)") if l in handles]
     if legend_ax is not None:
         legend_ax.legend([handles[l] for l in order], order, loc="center", frameon=False, fontsize=8)
     else:
@@ -315,22 +411,38 @@ def main() -> None:
                    frameon=False, fontsize=8, bbox_to_anchor=(0.5, -0.02))
     for ax in axes[::ncols]:
         ax.set_ylabel("$R_f$ after $k$ iterations", fontsize=8)
-    fig.supxlabel("iterations $k$  (learned steps / unrolled layers / solver iterations)", fontsize=8, y=0.035)
+    if args.overlay == "none":
+        # RNNProp never gets below ~1e-3; the 1e-5 floor exists for FISTA's tail.
+        for ax in axes[:len(ps)]:
+            ax.set_ylim(min(c[1:].min() for c in rf_mf.values()) / 3, None)
+        xlab = "learned steps $k$"
+    else:
+        xlab = "iterations $k$  (learned steps / unrolled layers / solver iterations)"
+    fig.supxlabel(xlab, fontsize=8, y=0.035)
     if not rf_mf:
         mf_note = "no valid model-free rows in this run; "
     elif len(widths_present) > 1:
-        mf_note = "RNNProp: median over {} seed(s), the {} width curves coincide; ".format(
-            n_seeds_note, len(widths_present))
+        mf_note = ("RNNProp: median over {} seed(s); the {} width curves agree to <1% for k<100 "
+                   "and within ~2x on the plateau; ").format(n_seeds_note, len(widths_present))
     else:
         mf_note = "RNNProp ({} width only so far): median over {} seed(s); ".format(
             widths_present[0][1].lower(), n_seeds_note)
-    fig.suptitle("Modified relative loss vs. iteration budget -- {}\n"
-                 "{}LISTA/ALISTA: median over {} seed(s), "
-                 "bar = spread across training widths; axis floor {:g} = converged"
-                 .format(RUNS[run_key]["subtitle"], mf_note, len(mb_seeds), RF_FLOOR),
+    if args.overlay == "full":
+        tail = "LISTA/ALISTA: median over {} seed(s), thin curves = per layer, one per width, " \
+               "bar = spread across widths; ".format(len(mb_seeds))
+        title = "Modified relative loss vs. iteration budget -- {}"
+    elif args.overlay == "classical":
+        tail = "ISTA/FISTA from the same shared $x_0$ (median over seeds); "
+        title = "Modified relative loss vs. iteration budget, RNNProp vs classical -- {}"
+    else:
+        tail = ""
+        title = "RNNProp: modified relative loss vs. learned steps, by training width -- {}"
+    floor_note = "" if args.overlay == "none" else "axis floor {:g} = converged".format(RF_FLOOR)
+    fig.suptitle((title + "\n{}{}{}").format(RUNS[run_key]["subtitle"], mf_note, tail, floor_note).rstrip("; "),
                  fontsize=9, color=INK_PRIMARY, y=1.01)
     fig.tight_layout(rect=(0, 0.02, 1, 1))
-    save(fig, run_key, "compute_matched_rf_{}".format(run_key))
+    suffix = {"full": "", "classical": "_classical", "none": "_rnnprop_only"}[args.overlay]
+    save(fig, run_key, "compute_matched_rf_{}{}".format(run_key, suffix))
 
     # ------------------------------------------------- iterations-to-match
     match: Dict[Tuple[str, str, float], Optional[int]] = {}
@@ -414,7 +526,7 @@ def main() -> None:
         "% Generated by plot_compute_matched_rf.py --run {}. Requires \\usepackage{{graphicx}}".format(run_key),
         "% and \\usepackage{subcaption}. Paths are relative to the repo root (Figs/...);",
         "% adjust \\graphicspath or the paths below to match the Overleaf project.",
-        "% Include with: \\input{{iterations_to_match_{}_figure}}".format(run_key),
+        "% Include with: \\input{{Figs/multifigure/iterations_to_match_{}_figure}}".format(run_key),
         r"\begin{figure}[htbp]", r"\centering"]
     for i, (name, cap, lab) in enumerate(sub_entries):
         fig_lines += [r"\begin{subfigure}[t]{0.48\linewidth}", r"  \centering",
@@ -431,7 +543,8 @@ def main() -> None:
         r"target was never reached within the evaluation horizon. Iteration-matched is not compute-matched: "
         r"one learned step is an LSTM forward pass per coordinate, one ISTA/FISTA step a matrix product.}",
         r"\label{fig:iterations-to-match-" + run_key.replace("_", "-") + "}", r"\end{figure}"]
-    out_fig_tex = "iterations_to_match_{}_figure.tex".format(run_key)
+    os.makedirs(MULTIFIG_DIR, exist_ok=True)
+    out_fig_tex = os.path.join(MULTIFIG_DIR, "iterations_to_match_{}_figure.tex".format(run_key))
     with open(out_fig_tex, "w", encoding="utf-8") as f:
         f.write("\n".join(fig_lines) + "\n")
     print("  wrote", out_fig_tex)

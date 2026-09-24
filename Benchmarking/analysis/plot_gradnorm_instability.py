@@ -22,8 +22,9 @@ PROFILE_PATH = os.path.join(
     "runs", "scale_diag_profile", "25x50", "checkpoints", "s0", "narrow",
     "l2o-dm", "profile.jsonl")
 OUT_NAME = "gradnorm_instability_l2o-dm_25x50"
-# Thesis figures directory (repo root, sibling of Benchmarking/) -- every
-# figure is saved here in addition to alongside this script.
+# Thesis figures directory (repo root, sibling of Benchmarking/). Figures go
+# here ONLY: these scripts used to write a second copy into Benchmarking/,
+# which left tracked duplicates of every figure in the source tree.
 THESIS_FIGS_DIR = os.path.join("..", "Figs")
 
 # Curriculum advanced from the 100-step to the 500-step rung at this epoch
@@ -86,7 +87,7 @@ def main():
                  color=INK_PRIMARY, fontsize=10)
     fig.tight_layout()
 
-    for out_dir in (".", THESIS_FIGS_DIR):
+    for out_dir in (THESIS_FIGS_DIR,):
         out_stem = os.path.join(out_dir, OUT_NAME)
         fig.savefig(out_stem + ".png", facecolor=SURFACE, bbox_inches="tight", dpi=200)
         print("wrote", out_stem + ".png")
