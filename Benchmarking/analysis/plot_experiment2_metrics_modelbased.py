@@ -18,7 +18,7 @@ doubled to 64 000 instances, seeds 21-23 only). Twelve figures:
 
 Scope: lista/alista only. Every model-free row in both runs was produced by an
 evaluation that loaded a checkpoint written through the Keras-3 bare-`v.name`
-collision (see ../RESULTS_VALIDITY.md), so those rows are invalid. Reads
+collision, so those rows are invalid. Reads
 results.jsonl directly and NOT summary.json -- both runs' summary.json predate
 the 2026-09-06 pruning of those rows and still contain them.
 

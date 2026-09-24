@@ -23,7 +23,7 @@ Two metrics, `--metric rf` (default) and `--metric nmse`:
 Inputs: each cell's `all_test_metrics_perfile.json` (per-file `lasso_layer{i}`,
 i = 0..15, written by `regenerate_modelbased_trajectories.py`; the library's own
 `all_test_metrics.json` values are running means across test files for any cell
-evaluated before the 2026-09-17 fix -- see RESULTS_VALIDITY.md), the row's
+evaluated before the 2026-09-17 fix), the row's
 `modified_relative_loss` for k = 16, and the run's x* cache for the exact mean f*.
 For `--metric nmse`, each cell's `all_test_nmse_perfile.json` instead, written by
 `compute_modelbased_nmse_trajectories.py` (no sweep stores per-layer NMSE: they
@@ -142,13 +142,15 @@ def per_seed_layer_curves(run_dir: str, rows: List[dict], lam: float, m: int, me
     if missing and metric == "nmse":
         raise SystemExit(
             "{} model-based cells lack all_test_nmse_perfile.json -- no sweep stores per-layer "
-            "NMSE, run: python analysis/repair/compute_modelbased_nmse_trajectories.py --run {}".format(missing, run_dir))
+            "NMSE. The per-layer files ship precomputed under runs/; the generator "
+            "that produces them lives on the unified-slice branch.".format(missing))
     if missing:
         raise SystemExit(
             "{} model-based cells lack all_test_metrics_perfile.json. The stored "
             "all_test_metrics.json values are running means across test files for any "
             "cell evaluated before the 2026-09-17 fix, so they are not usable here -- "
-            "run: python analysis/repair/regenerate_modelbased_trajectories.py --run {}".format(missing, run_dir))
+            "The corrected per-file values ship under runs/; the regeneration script "
+            "lives on the unified-slice branch.".format(missing))
     return curves
 
 

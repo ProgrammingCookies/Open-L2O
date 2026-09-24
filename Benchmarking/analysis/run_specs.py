@@ -49,7 +49,7 @@ FISTA_COLUMNS = [("fista@16", "FISTA-16"), ("fista@1000", "FISTA-1000")]
 MODEL_BASED = [("lista", "LISTA"), ("alista", "ALISTA")]
 # Model-free arm evaluated at 1000 learned steps (the pre-study's own
 # per-protocol budget). Only legitimate in runs trained AND evaluated after the
-# 2026-09-06 checkpoint fix -- see RESULTS_VALIDITY.md.
+# 2026-09-06 checkpoint fix.
 RNNPROP = [("l2o-rnnprop", "L2O-RNNProp")]
 
 # The two width schemes. The pre-study's original triad is centred on p=0.10 for
@@ -208,7 +208,7 @@ _add(RunSpec(
         "  * l2o-dm / l2o-rnnprop columns. This run's model-free rows were produced "
         "    through the checkpoint save/load bug and were pruned from results.jsonl "
         "    on 2026-09-06; they survive only in a stale summary.json, which nothing "
-        "    here reads. See RESULTS_VALIDITY.md.\n"
+        "    here reads.\n"
         "  * a clean width reading. Narrow is centred on p=0.10 while medium and wide "
         "    are centred on ~0.1375 and 0.175, so 'wide vs narrow' here also moves the "
         "    centre. That is why exp2_try3_210x300 exists. Appendix material at most."
