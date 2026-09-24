@@ -24,6 +24,19 @@ flags.DEFINE_enum('task', 'sc', ['sc', 'lasso', 'cs'],
         '`cs` (compressive senssing).')
 flags.DEFINE_float('lasso_lam', 0.005,
         'The L1 regularization strength in Lasso objective.')
+flags.DEFINE_enum('lasso_train_objective', 'paper', ['paper', 'scoring'],
+        'task=lasso only. `paper` (default, utils.LassoLoss): the historical '
+        'training objective, 0.25*||Ax-b||^2 + lam*||x||_1 summed over the '
+        'batch, equivalent to training at an effective lambda of 2*lasso_lam.'
+        '`scoring` (utils.ScoringLassoLoss): the exact objective every scoring path '
+        'uses, 0.5*||Ax-b||^2 + lam*||x||_1, batch mean. `paper` stays the '
+        'default so existing results stay reproducible.')
+flags.DEFINE_boolean('deterministic_data', False,
+        'Force reproducible training-batch order (an explicit shuffle seed '
+        '+ tf.data deterministic map/batch ordering) instead of the default '
+        'non-deterministic parallel pipeline. Off by default. '
+        'uses --seed as the shuffle seed when on. Narrower than --gpu_determinism, which '
+        'covers this AND float reduction order.')
 # Alista settings
 flags.DEFINE_string('alista_W_file', 'W.npy',
         'File that contains the analytically solved weight matrix.')
@@ -143,7 +156,9 @@ def run(
           train_batch_size,
           task,
           drop_remainder=False,
-          A=A)
+          A=A,
+          deterministic=FLAGS.deterministic_data,
+          seed=FLAGS.seed if FLAGS.deterministic_data else None)
       val_dataset = data_preprocessing.input_fn(
           False,
           data_dir,
@@ -219,7 +234,10 @@ def run(
 
   if task == 'lasso':
     _A_const = tf.constant(A, name='A_lasso_const')
-    loss = utils.LassoLoss(_A_const, FLAGS.lasso_lam, N, F)
+    if FLAGS.lasso_train_objective == 'paper':
+      loss = utils.LassoLoss(_A_const, FLAGS.lasso_lam, N, F)
+    else:
+      loss = utils.ScoringLassoLoss(_A_const, FLAGS.lasso_lam, N)
     metrics_compile = [utils.LassoObjective('lasso', _A_const, FLAGS.lasso_lam, M, N, -1)]
     monitor = 'val_lasso'
   else:
