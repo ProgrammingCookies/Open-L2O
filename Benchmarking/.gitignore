@@ -2,3 +2,5 @@
 results/
 runs/
 __pycache__/
+tests/golden/
+.pytest_cache/
