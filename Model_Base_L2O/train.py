@@ -31,6 +31,9 @@ flags.DEFINE_enum('lasso_train_objective', 'paper', ['paper', 'scoring'],
         '`scoring` (utils.ScoringLassoLoss): the exact objective every scoring path '
         'uses, 0.5*||Ax-b||^2 + lam*||x||_1, batch mean. `paper` stays the '
         'default so existing results stay reproducible.')
+flags.DEFINE_boolean('gpu_determinism', False,
+        'Call tf.config.experimental.enable_op_determinism() '
+        'making same-seed/hardware/software GPU runs bit-reproducible.')
 flags.DEFINE_boolean('deterministic_data', False,
         'Force reproducible training-batch order (an explicit shuffle seed '
         '+ tf.data deterministic map/batch ordering) instead of the default '
@@ -475,6 +478,8 @@ def run(
 
 
 def main(_):
+  if FLAGS.gpu_determinism:
+    tf.config.experimental.enable_op_determinism()
   base_dir = FLAGS.base_dir
   data_dir = FLAGS.data_dir
   mode = 'test' if FLAGS.test else 'train'
