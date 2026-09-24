@@ -43,11 +43,16 @@ def parse_args():
     p.add_argument("--lasso_split", default="val_data.npy")
     p.add_argument("--lasso_batch_size", type=int, default=128)
     p.add_argument("--lasso_lam", type=float, default=0.005)
+    p.add_argument("--gpu_determinism", action="store_true",
+                   help='Call tf.config.experimental.enable_op_determinism() '
+                        'making same-seed/hardware/software GPU runs bit-reproducible.')
     return p.parse_args()
 
 
 def main():
     FLAGS = parse_args()
+    if getattr(FLAGS, "gpu_determinism", False):
+        tf.config.experimental.enable_op_determinism()
 
     if FLAGS.seed is not None:
         tf.random.set_seed(FLAGS.seed)

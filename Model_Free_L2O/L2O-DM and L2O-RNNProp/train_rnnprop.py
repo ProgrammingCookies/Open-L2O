@@ -77,11 +77,16 @@ def parse_args():
                    help="'aligned' (default) requires the dataset's seeded x0 "
                         "sibling files. 'random' draws a fresh N(0,x0_stddev^2) "
                         "init each call instead so no x0 files required.")
+    p.add_argument("--gpu_determinism", action="store_true",
+                   help='Call tf.config.experimental.enable_op_determinism() '
+                        'making same-seed/hardware/software GPU runs bit-reproducible.')
     return p.parse_args()
 
 
 def main():
     FLAGS = parse_args()
+    if getattr(FLAGS, "gpu_determinism", False):
+        tf.config.experimental.enable_op_determinism()
     if FLAGS.seed is not None:
         random.seed(FLAGS.seed)
         np.random.seed(FLAGS.seed)

@@ -113,6 +113,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=None,
                    help="If given, evaluate on just this seed instead of the default "
                         "sweep [6, 12, 18, 24, 30].")
+    p.add_argument("--gpu_determinism", action="store_true",
+                   help='Call tf.config.experimental.enable_op_determinism() '
+                        'making same-seed/hardware/software GPU runs bit-reproducible.')
     return p.parse_args()
 
 
@@ -151,6 +154,8 @@ def _build_l2o_optimizer(FLAGS):
 
 def main():
     FLAGS = parse_args()
+    if getattr(FLAGS, "gpu_determinism", False):
+        tf.config.experimental.enable_op_determinism()
 
     problems_and_data = []
     if FLAGS.include_mnist_mlp_problems:

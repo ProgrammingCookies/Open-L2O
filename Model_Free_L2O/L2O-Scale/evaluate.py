@@ -133,6 +133,9 @@ def parse_args():
                    help="If given, seeds random/numpy/TF (reproducible lr-prior "
                         "init and starting points) and evaluates on just this "
                         "seed instead of the default sweep [6, 12, 18, 24, 30].")
+    p.add_argument("--gpu_determinism", action="store_true",
+                   help='Call tf.config.experimental.enable_op_determinism() '
+                        'making same-seed/hardware/software GPU runs bit-reproducible.')
     return p.parse_args()
 
 
@@ -171,6 +174,8 @@ def _build_l2o_optimizer(FLAGS):
 
 def main():
     FLAGS = parse_args()
+    if getattr(FLAGS, "gpu_determinism", False):
+        tf.config.experimental.enable_op_determinism()
 
     # Same three RNGs train.py seeds. Without this the evaluation is not
     # reproducible: HierarchicalRNN draws every coordinate's initial log-lr
