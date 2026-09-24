@@ -31,7 +31,9 @@ def process_record_dataset(dataset,
                            shuffle_buffer,
                            drop_remainder=False,
                            A=None,
-                           task='sc'):
+                           task='sc',
+                           deterministic=False,
+                           seed=None):
   """Given a Dataset with raw records, return an iterator over the records.
 
   Args:
@@ -49,16 +51,17 @@ def process_record_dataset(dataset,
   """
   if is_training:
     # Shuffles records before repeating to respect epoch boundaries.
-    dataset = dataset.shuffle(buffer_size=shuffle_buffer)
+    dataset = dataset.shuffle(buffer_size=shuffle_buffer, seed=seed)
     # Repeats the dataset for the number of epochs to train.
     dataset = dataset.repeat()
 
-    # Use a private thread pool and limit intra-op parallelism. Enable
-    # non-determinism only for training.
+    # Use a private thread pool and limit intra-op parallelism.
+    # deterministic=False (default) when true it 
+    # forces reproducible ordering instead (read tf.config.experimental.enable_op_determinism()).
     options = tf.data.Options()
     options.experimental_threading.max_intra_op_parallelism = 1
     options.experimental_threading.private_threadpool_size = 16
-    options.experimental_deterministic = False
+    options.experimental_deterministic = bool(deterministic)
     dataset = dataset.with_options(options)
 
   dataset = dataset.apply(
@@ -80,7 +83,9 @@ def input_fn(is_training,
              input_context=None,
              drop_remainder=False,
              A=None,
-             filename=None):
+             filename=None,
+             deterministic=False,
+             seed=None):
   """Input function which provides batches for train or eval.
 
   Args:
@@ -135,5 +140,7 @@ def input_fn(is_training,
       shuffle_buffer=shuffle_buffer,
       drop_remainder=drop_remainder,
       A=A,
-      task=task)
+      task=task,
+      deterministic=deterministic,
+      seed=seed)
 

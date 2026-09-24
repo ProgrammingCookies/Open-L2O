@@ -38,6 +38,30 @@ class LassoLoss(tf.keras.losses.Loss):
     return 0.5 * l2_loss + self._lam * l1_loss
 
 
+class ScoringLassoLoss(tf.keras.losses.Loss):
+  """NOT LassoLoss above: per-instance ``0.5*||Ax-b||^2 + lam*||x||_1``, batch
+  mean, the exact objective every scoring path (LassoObjective, FISTA x*,
+  Benchmarking/core/lasso_metrics.py) uses. LassoLoss trains on
+  ``0.25*||Ax-b||^2 + lam*||x||_1`` instead (``0.5 * tf.nn.l2_loss(...)``
+  double-halves the reconstruction term, since tf.nn.l2_loss already returns
+  sum(v**2)/2), which is exactly equivalent to training at an effective
+  lambda of ``2*lam``. Opt-in through --lasso_train_objective=scoring.
+  """
+
+  def __init__(self, A, lam, N, **kwargs):
+    super(ScoringLassoLoss, self).__init__(**kwargs)
+    self._A = A
+    self._lam = lam
+    self.N = N
+
+  def call(self, y_true, y_pred):
+    sparse_pred = y_pred[:, -self.N:]
+    measure_pred = tf.matmul(sparse_pred, self._A, transpose_b=True)
+    l2_loss = tf.reduce_sum(tf.square(measure_pred - y_true[:, :-self.N]), axis=-1)
+    l1_loss = tf.reduce_sum(tf.abs(sparse_pred), axis=-1)
+    return tf.reduce_mean(0.5 * l2_loss + self._lam * l1_loss)
+
+
 class LassoObjective(tf.keras.metrics.Mean):
 
   def __init__(self, name, A, lam, M, N, layer_id=-1, dtype=None):
