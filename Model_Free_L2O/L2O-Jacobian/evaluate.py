@@ -126,7 +126,7 @@ def parse_args():
     p.add_argument("--restore_model_name", default="model-final.l2o",
                    help="Checkpoint filename (relative to --train_dir/<optimizer dir>) to load.")
     p.add_argument("--seed", type=int, default=None,
-                   help="If given, evaluate on just this seed instead of the default ".")
+                   help="If given, evaluate on just this seed instead of the default.")
     return p.parse_args()
 
 
