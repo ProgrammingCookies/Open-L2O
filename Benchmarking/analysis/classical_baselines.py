@@ -37,9 +37,9 @@ Outputs, under `<run_dir>/`:
                               classical convergence curves.
 
 Usage:
-  python classical_baselines.py --run runs/exp2_try2
-  python classical_baselines.py --run runs/exp2_real --seeds 0 1 2
-  python classical_baselines.py --run runs/exp2_try3_210x300 --iters 16 100 1000
+  python analysis/classical_baselines.py --run runs/exp2_try2
+  python analysis/classical_baselines.py --run runs/exp2_real --seeds 0 1 2
+  python analysis/classical_baselines.py --run runs/exp2_try3_210x300 --iters 16 100 1000
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.lasso_metrics import evaluate_lasso_recovery, lasso_objective, soft_threshold  # noqa: E402
 from data.lasso import _test_filename, _x0_filename  # noqa: E402
 

@@ -1,15 +1,24 @@
-"""Computes and plots ALISTA's per-layer gradient norm from EXISTING trained
-checkpoints -- a read-only diagnostic, same method as plot_gradnorm_lista.py.
-Does NOT modify Model_Base_L2O's training code.
+"""Computes and plots LISTA's per-layer gradient norm from EXISTING trained
+checkpoints -- a read-only diagnostic. Does NOT modify Model_Base_L2O's
+training code (utils.py/train.py); it only imports the same model/loss
+classes those scripts already use and calls them exactly as train.py does.
 
-NOTE ON SCALE: ALISTA has no checkpoint at (25,50) at all -- the
-scale_diagnostic.py diagnostic runs never included it (W.npy, its analytic
-weight matrix, was never generated at that scale either). This reads the
-real, complete checkpoints from the full exp2_real sweep instead, at its
-native (m,n)=(210,300) scale -- a real result, but NOT the same scale as
-plot_gradnorm_instability.py's L2O-DM figure or plot_gradnorm_lista.py's
-LISTA figure (both (25,50)). Read this one on its own terms, not as a
-scale-matched three-way overlay, unless/until ALISTA is run at (25,50) too.
+For each of LISTA's 16 layers, restores that layer's saved checkpoint (the
+model's state right after that layer's own progressive 3-stage training
+finished -- Model_Base_L2O/train.py's per-layer loop already writes one
+checkpoint per layer, unprompted by this script) and recomputes the
+LASSO-loss gradient w.r.t. every trainable variable at that point, on one
+real batch of training data. That's the direct LISTA analog of L2O-DM's raw
+meta-gradient norm (plot_gradnorm_instability.py) -- but at per-LAYER
+resolution rather than per-epoch, since LISTA has no single continuous
+training loop the way L2O-DM/RNNProp do (it's ~48 separate model.fit() calls,
+one per progressive stage per layer); a live per-step trace would require
+instrumenting utils.Adam.apply_gradients, which this script deliberately
+does not do.
+
+Reads the (25,50)/narrow/seed-0 checkpoints from the scale_diagnostic.py
+diagnostic sequence (runs/scale_diag/25x50/...), the same scale as
+plot_gradnorm_instability.py's L2O-DM figure, for a same-scale comparison.
 """
 from __future__ import annotations
 
@@ -24,24 +33,23 @@ _MODEL_BASE_L2O = os.path.abspath(os.path.join("..", "Model_Base_L2O"))
 if _MODEL_BASE_L2O not in sys.path:
     sys.path.insert(0, _MODEL_BASE_L2O)
 
+import data_preprocessing  # noqa: E402
 import models  # noqa: E402
 import utils  # noqa: E402
 
-DATA_DIR = os.path.join("runs", "exp2_real", "data", "seed0", "narrow")
+DATA_DIR = os.path.join("runs", "scale_diag", "25x50", "data", "seed0", "narrow")
 CHECKPOINT_ROOT = os.path.join(
-    "runs", "exp2_real", "checkpoints", "s0", "narrow", "alista",
-    "checkpoints", "models", "alista__narrow__s0", "replicate_1")
+    "runs", "scale_diag", "25x50", "checkpoints", "s0", "narrow", "lista",
+    "checkpoints", "models", "lista__narrow__s0", "replicate_1")
 NUM_LAYERS = 16
 LASSO_LAM = 0.005
-SS_Q_PER_LAYER = 1.2
-SS_MAXQ = 13.0
-BATCH_SIZE = 256
+BATCH_SIZE = 256  # one fixed real batch, same batch for every layer
 
-OUT_NAME = "gradnorm_alista_210x300"
+OUT_NAME = "gradnorm_lista_25x50"
 THESIS_FIGS_DIR = os.path.join("..", "Figs")
 
-LINE_COLOR = "#1baf7a"  # dataviz skill's categorical aqua -- third slot in
-                        # the same palette as the LISTA (blue) / L2O-DM (orange) figures
+LINE_COLOR = "#2a78d6"  # dataviz skill's categorical blue -- same tokens as
+                        # plot_ood_degradation.py / plot_gradnorm_instability.py
 SURFACE = "#fcfcfb"
 GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
@@ -50,8 +58,10 @@ INK_MUTED = "#898781"
 
 
 def load_batch():
+    """One real, fixed batch of (model_input, label) rows, built exactly the
+    way data_preprocessing.dataset_parser does for task='lasso': input is
+    [b; x0] (the seeded starting point), label is [b; x_true]."""
     a = np.load(os.path.join(DATA_DIR, "A.npy")).astype(np.float32)
-    w = np.load(os.path.join(DATA_DIR, "W.npy")).astype(np.float32)
     m, n = a.shape
     train = np.load(os.path.join(DATA_DIR, "train_data.npy")).astype(np.float32)
     x0 = np.load(os.path.join(DATA_DIR, "train_data_x0.npy")).astype(np.float32)
@@ -62,20 +72,22 @@ def load_batch():
     x0_batch = x0[idx]
     model_input = tf.constant(np.concatenate([b, x0_batch], axis=1))
     label = tf.constant(np.concatenate([b, x_true], axis=1))
-    return a, w, m, n, model_input, label
+    return a, m, n, model_input, label
 
 
 def main():
-    a, w, m, n, model_input, label = load_batch()
+    a, m, n, model_input, label = load_batch()
     a_const = tf.constant(a, name="A_lasso_const")
     loss_fn = utils.LassoLoss(a_const, LASSO_LAM, n, None)
 
-    model = models.Alista(a, w, NUM_LAYERS, LASSO_LAM, SS_Q_PER_LAYER, SS_MAXQ,
-                          None, name="Alista")
+    model = models.Lista(a, NUM_LAYERS, LASSO_LAM, False, None, name="Lista")
 
     grad_norms = []
     for layer_id in range(NUM_LAYERS):
         model.create_cell(layer_id)
+        # Trigger a forward pass so every layer's weights are actually built
+        # before checkpoint.restore -- same trick evaluate_*.py scripts use
+        # for the model-free adapters (dummy step before loading weights).
         _ = model(model_input, training=False)
 
         layer_dir = os.path.join(CHECKPOINT_ROOT, "layer_{}".format(layer_id + 1))
@@ -123,7 +135,7 @@ def main():
     ax.plot(layers, grad_norms, color=LINE_COLOR, linewidth=1.6, marker="o",
            markersize=4, zorder=3)
 
-    ax.set_title("ALISTA gradient norm across its 16 layers  ·  (m,n)=(210,300)",
+    ax.set_title("LISTA gradient norm across its 16 layers",
                 fontsize=12, color=INK_PRIMARY, loc="left")
     ax.set_xlabel("Layer (checkpoint after that layer's training)", color=INK_PRIMARY)
     ax.set_ylabel(r"$\Vert\nabla_\theta \mathcal{L}\Vert$ (log scale)",
@@ -131,7 +143,7 @@ def main():
     ax.set_xticks(layers)
     fig.tight_layout()
 
-    for out_dir in (".", THESIS_FIGS_DIR):
+    for out_dir in (THESIS_FIGS_DIR,):
         out_stem = os.path.join(out_dir, OUT_NAME)
         fig.savefig(out_stem + ".png", facecolor=SURFACE, bbox_inches="tight", dpi=200)
         print("wrote", out_stem + ".png")

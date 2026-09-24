@@ -6,7 +6,7 @@ Experiment-2-specific by necessity: it knows the ``experiments/(v2/)experiment2*
 artifact layout. Sweeps run after 2026-09-17 carry the fingerprint in their
 rows natively and never need this.
 
-    python backfill_fingerprints_exp2.py --run runs/exp2_try3_210x300
+    python analysis/backfill_fingerprints_exp2.py --run runs/exp2_try3_210x300
 
 Writes ``<run>/results_with_fingerprints.jsonl`` (never touches
 ``results.jsonl``). Rows whose artifacts cannot be found are copied through
@@ -29,7 +29,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.fingerprint import METRIC_KEY, fingerprint_arrays  # noqa: E402
 
 _MODEL_FREE = ("l2o-dm", "l2o-rnnprop", "l2o-scale")
