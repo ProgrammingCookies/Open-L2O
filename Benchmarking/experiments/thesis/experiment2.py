@@ -3,7 +3,7 @@ Experiment 2 main file, ported onto ``experiments/sweep.py``.
 
 Runs the full sweep over methods L2O-DM, L2O-RNNProp, LISTA, ALISTA. (check pre-study table)
 
-This is a 1:1 port of ``experiments/experiment2.py``: every hyperparameter,
+This is a 1:1 port of the pre-sweep original ``experiments/experiment2.py``: every hyperparameter,
 every flag translation, and every metric is unchanged, and a ``--smoke`` run
 produces the same result rows. What changed is only the plumbing -- the grid
 loop, resume, error capture, config snapshot and summarization now come from
@@ -25,8 +25,8 @@ Resume is compatible with results.jsonl files written by the pre-port
 method/width/seed fields, so a run started there can be finished here.
 
 Usage:
-    python experiments/v2/experiment2.py --results_dir runs/exp2_smoke --seeds 0 --smoke
-    python experiments/v2/experiment2.py --results_dir runs/exp2 --seeds 0 1 2 3 4 5 6 7 8 9
+    python experiments/thesis/experiment2.py --results_dir runs/exp2_smoke --seeds 0 --smoke
+    python experiments/thesis/experiment2.py --results_dir runs/exp2 --seeds 0 1 2 3 4 5 6 7 8 9
 """
 
 from __future__ import annotations
@@ -38,17 +38,18 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-_V2_DIR = os.path.dirname(os.path.abspath(__file__))
-_EXPERIMENTS_DIR = os.path.dirname(_V2_DIR)
+_THESIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_THESIS_DIR)
 _BENCHMARKING_ROOT = os.path.dirname(_EXPERIMENTS_DIR)
 # Order matters and must be enforced, not assumed. Python puts the script's own
-# directory (v2/) on sys.path automatically, but a plain insert(0, ...) of the
-# others pushes it back -- and since these files share their names with the
-# pre-port originals one level up, `import experiment2` would then silently
-# resolve to experiments/experiment2.py instead of this directory's. Removing
-# each path before re-inserting makes the final order exactly V2 > experiments
-# > Benchmarking, whatever was there before.
-for _p in (_BENCHMARKING_ROOT, _EXPERIMENTS_DIR, _V2_DIR):
+# directory (thesis/) on sys.path automatically, but a plain insert(0, ...) of
+# the others pushes it back, and `import experiment2` would then resolve
+# against experiments/ or Benchmarking/ rather than this directory. Removing
+# each path before re-inserting makes the final order exactly thesis/ >
+# experiments/ > Benchmarking/, whatever was there before. (Until 2026-09-24
+# this also guarded against same-named pre-port originals one level up; those
+# are gone, but the ordering guarantee is still the thing being asserted.)
+for _p in (_BENCHMARKING_ROOT, _EXPERIMENTS_DIR, _THESIS_DIR):
     while _p in sys.path:
         sys.path.remove(_p)
     sys.path.insert(0, _p)

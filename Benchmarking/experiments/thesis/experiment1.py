@@ -9,7 +9,7 @@ flat per-run results table (JSON Lines) and a seed-aggregated summary
 (mean/std per (method, dim, unroll_length)), matching Table 2's "Mean, Std
 Dev across the 10 runs".
 
-PORTING NOTE. This is a 1:1 port of ``experiments/experiment1.py``: same
+PORTING NOTE. This is a 1:1 port of the pre-sweep original ``experiments/experiment1.py``: same
 dimensions, unroll lengths, budgets, dataset generation, and metrics. The
 ~175 lines of provenance capture this file used to own (``_run_git``,
 ``_head_from_git_dir``, ``_git_state``, ``_append_provenance_record``) were
@@ -106,8 +106,8 @@ method/dim/unroll_length/seed fields.
    which Table 1 does not claim is apples-to-apples on batch size anyway.
 
 Usage:
-    python experiments/v2/experiment1.py --results_dir runs/exp1_smoke --seeds 0 --smoke
-    python experiments/v2/experiment1.py --results_dir runs/exp1 --seeds 0 1 2 3 4 5 6 7 8 9
+    python experiments/thesis/experiment1.py --results_dir runs/exp1_smoke --seeds 0 --smoke
+    python experiments/thesis/experiment1.py --results_dir runs/exp1 --seeds 0 1 2 3 4 5 6 7 8 9
 """
 
 from __future__ import annotations
@@ -122,17 +122,18 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-_V2_DIR = os.path.dirname(os.path.abspath(__file__))
-_EXPERIMENTS_DIR = os.path.dirname(_V2_DIR)
+_THESIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_THESIS_DIR)
 _BENCHMARKING_ROOT = os.path.dirname(_EXPERIMENTS_DIR)
 # Order matters and must be enforced, not assumed. Python puts the script's own
-# directory (v2/) on sys.path automatically, but a plain insert(0, ...) of the
-# others pushes it back -- and since these files share their names with the
-# pre-port originals one level up, `import experiment2` would then silently
-# resolve to experiments/experiment2.py instead of this directory's. Removing
-# each path before re-inserting makes the final order exactly V2 > experiments
-# > Benchmarking, whatever was there before.
-for _p in (_BENCHMARKING_ROOT, _EXPERIMENTS_DIR, _V2_DIR):
+# directory (thesis/) on sys.path automatically, but a plain insert(0, ...) of
+# the others pushes it back, and `import experiment2` would then resolve
+# against experiments/ or Benchmarking/ rather than this directory. Removing
+# each path before re-inserting makes the final order exactly thesis/ >
+# experiments/ > Benchmarking/, whatever was there before. (Until 2026-09-24
+# this also guarded against same-named pre-port originals one level up; those
+# are gone, but the ordering guarantee is still the thing being asserted.)
+for _p in (_BENCHMARKING_ROOT, _EXPERIMENTS_DIR, _THESIS_DIR):
     while _p in sys.path:
         sys.path.remove(_p)
     sys.path.insert(0, _p)

@@ -1,5 +1,5 @@
 """
-Experiment 2, take 2. (It's a standalone file so if you're trying to understand the benchmarking platform's generality, you can skip it.)
+Experiment 2, take 2, ported onto ``experiments/sweep.py``.
 
 Why this file exists, separate from experiment2.py: the original Experiment 2
 config runs model-free L2O (L2O-DM/L2O-RNNProp) at (m,n)=(210,300), sourced
@@ -27,56 +27,62 @@ centre) is worth running at the pre-study's own Table-3 dimensions too. Pass
 width experiment. That combination -- real dims, noiseless, centred widths --
 is the deconfounded version of Experiment 2.
 
+PORTING NOTE. This is a 1:1 port of the pre-sweep original ``experiments/experiment2_try2.py``: same
+hyperparameters, same flag translation, same metrics, and a ``--smoke`` run
+produces the same result rows. Only the plumbing moved to ``sweep.py``.
+The shared *vocabulary* (method names, widths, ``method_kind``,
+``test_filename``) is imported from the ported ``experiment2.py`` rather than
+re-declared, since it is bookkeeping rather than an experimental decision. The
+config dataclass, ``_build_train_config`` and ``run_cell`` stay local and
+complete: they genuinely differ from experiment2.py's (patience, the
+training-curve hooks, the re-centred widths' justifications), and merging them
+would mean either changing experiment2.py's behaviour or carrying dead
+conditionals. Two experiments holding the same value for different reasons are
+not duplication -- the reasons are the part worth keeping.
+
 Usage:
-    python experiment2_try2.py --results_dir runs/exp2_try2 --seeds 21 --smoke
-    python experiment2_try2.py --results_dir runs/exp2_try2 --seeds 21
-    python experiment2_try2.py --results_dir runs/exp2_try2 --seeds 21 22 23 24 25 26 27 28 29 30
-    python experiment2_try2.py --results_dir runs/exp2_try3_210x300 --m 210 --n 300 \
-        --methods l2o-dm l2o-rnnprop lista alista --seeds 41 42 43 44 45 46 47 48 49 50
+    python experiments/thesis/experiment2_try2.py --results_dir runs/exp2_try2 --seeds 21 --smoke
+    python experiments/thesis/experiment2_try2.py --results_dir runs/exp2_try2 --seeds 21
+    python experiments/thesis/experiment2_try2.py --results_dir runs/exp2_try2 \
+        --seeds 21 22 23 24 25 26 27 28 29 30
+    python experiments/thesis/experiment2_try2.py --results_dir runs/exp2_try3_210x300 \
+        --m 210 --n 300 --methods l2o-dm l2o-rnnprop lista alista \
+        --seeds 41 42 43 44 45 46 47 48 49 50
 """
 
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import json
 import os
-import subprocess
 import sys
 import time
-import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-import numpy as np
+_THESIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_THESIS_DIR)
+_BENCHMARKING_ROOT = os.path.dirname(_EXPERIMENTS_DIR)
+# Order matters and must be enforced, not assumed. Python puts the script's own
+# directory (thesis/) on sys.path automatically, but a plain insert(0, ...) of
+# the others pushes it back, and `import experiment2` would then resolve
+# against experiments/ or Benchmarking/ rather than this directory. Removing
+# each path before re-inserting makes the final order exactly thesis/ >
+# experiments/ > Benchmarking/, whatever was there before. (Until 2026-09-24
+# this also guarded against same-named pre-port originals one level up; those
+# are gone, but the ordering guarantee is still the thing being asserted.)
+for _p in (_BENCHMARKING_ROOT, _EXPERIMENTS_DIR, _THESIS_DIR):
+    while _p in sys.path:
+        sys.path.remove(_p)
+    sys.path.insert(0, _p)
 
-_BENCHMARKING_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _BENCHMARKING_ROOT not in sys.path:
-    sys.path.insert(0, _BENCHMARKING_ROOT)
+import adapters  # noqa: F401,E402  (import side effect: registers all methods)
+from core.registry import get_method  # noqa: E402
+from data.lasso import (  # noqa: E402
+    DEFAULT_TEST_SPARSITIES, Experiment2Config, generate_experiment2_dataset)
 
-import adapters
-from core.registry import get_method
-from data.lasso import DEFAULT_TEST_SPARSITIES, Experiment2Config, generate_experiment2_dataset
-
-MODEL_FREE_METHODS = ("l2o-dm", "l2o-rnnprop", "l2o-scale")
-MODEL_BASED_METHODS = ("lista", "alista")
-ALL_METHODS = MODEL_FREE_METHODS + MODEL_BASED_METHODS
-WIDTHS = ("narrow", "medium", "wide")
-
-_NON_METRIC_ROW_KEYS = ("method", "width", "seed", "test_sparsity", "train_sec", "eval_sec")
-
-
-def method_kind(method_name: str) -> str:
-    if method_name in MODEL_FREE_METHODS:
-        return "model_free"
-    if method_name in MODEL_BASED_METHODS:
-        return "model_based"
-    raise ValueError("unknown method {!r} (expected one of {})".format(method_name, ALL_METHODS))
-
-
-def _test_filename(p: float) -> str:
-    return "test_sparsity_{:.2f}.npy".format(p)
+from sweep import Axis, SweepSpec, add_overrides, apply_overrides, run_sweep  # noqa: E402
+from experiment2 import (  # noqa: E402
+    ALL_METHODS, WIDTHS, make_dataset, method_kind, test_filename)
 
 
 @dataclass
@@ -216,6 +222,21 @@ class OrchestratorConfig:
     # of train_dm.py's best-internal-eval `.l2l-0`. Same which-problem-was-best
     # caveat as DM: read `evaluation k, cost=` in train.log before comparing.
     scale_select_checkpoint: str = "best"
+    # RMSProp meta-optimizer learning rate (train.py --meta_learning_rate).
+    # Until 2026-09-18 this was never set here, so train.py's library default
+    # 1e-6 applied silently (DM/RNNProp use Adam at 1e-3, see model_free_lr).
+    # At this budget (100 problems x 50 unrolls = 5,000 meta-updates) 1e-6
+    # moves each weight by at most ~5e-3: the s21 narrow/medium checkpoints
+    # ended within 0.3-0.4 % (relative L2) of their initialisation and their
+    # held-out numbers within 0-4 % of the UNTRAINED optimizer's, i.e. those
+    # rows measure the HierarchicalRNN prior, not a meta-trained L2O-Scale
+    # (additional_context/experiments_analysis.md, 2026-09-18 Scale entries).
+    # Pilot 2026-09-18 (seed 21, narrow data, same batch sequence, paired
+    # against 1e-6): 1e-5 -3 % in-sample cost, stable; 1e-4 -10 % by problem
+    # 15 then drifts to +40 % with collapsing meta-gradients; 1e-3 thrashes
+    # (+19 %, stopped at problem 51). The default below is the library value
+    # so existing rows stay reproducible; override per the pilot's outcome.
+    scale_meta_learning_rate: float = 1e-6
 
     # Model-based (LISTA/ALISTA). 16 layers is stated in both the Primer and
     # the ALISTA repo's own default. base_lr/train_batch_size are the Primer's
@@ -319,6 +340,7 @@ def _build_train_config(method_name: str, cfg: OrchestratorConfig, width_dir: st
             "min_lr": cfg.scale_min_lr,
             "max_lr": cfg.scale_max_lr,
             "select_checkpoint": cfg.scale_select_checkpoint,
+            "meta_learning_rate": cfg.scale_meta_learning_rate,
         }
         if cfg.model_free_profile:
             train_flags["profile_path"] = os.path.join(output_dir, "profile.jsonl")
@@ -392,29 +414,25 @@ def _build_train_config(method_name: str, cfg: OrchestratorConfig, width_dir: st
             "ss_maxq": cfg.model_based_ss_maxq,
             **({
                 "track_training_curve": True,
-                "training_curve_test_file": _test_filename(cfg.model_based_training_curve_sparsity),
+                "training_curve_test_file": test_filename(cfg.model_based_training_curve_sparsity),
             } if cfg.model_based_track_training_curve else {}),
         },
     }
 
 
-def _make_row(method_name: str, width: str, seed: int, sparsity: float,
-             metrics: Dict[str, Any], train_sec: float, eval_sec: float) -> Dict[str, Any]:
-    row: Dict[str, Any] = {
-        "method": method_name, "width": width, "seed": seed, "test_sparsity": sparsity,
-        "train_sec": train_sec, "eval_sec": eval_sec,
-    }
-    row.update(metrics)
-    return row
+def run_cell(cfg: OrchestratorConfig, cell: Dict[str, Any],
+             context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Train once, evaluate on every test sparsity, return one row per sparsity.
 
-
-def run_one(method_name: str, config: OrchestratorConfig, width_dir: str, seed: int,
-           width: str, results_root: str) -> List[Dict[str, Any]]:
-    """Train once, evaluate on every test sparsity, return one row per sparsity."""
+    method/width/seed are stamped into the rows by the sweep driver, so they are
+    deliberately absent here.
+    """
+    method_name, width, seed = cell["method"], cell["width"], cell["seed"]
+    width_dir = os.path.join(context["seed_dir"], width)
     method = get_method(method_name)
     run_name = "{}__{}__s{}".format(method_name, width, seed)
-    output_dir = os.path.join(results_root, "s{}".format(seed), width, method_name)
-    train_config = _build_train_config(method_name, config, width_dir, seed, run_name, output_dir)
+    output_dir = os.path.join(context["checkpoints_dir"], "s{}".format(seed), width, method_name)
+    train_config = _build_train_config(method_name, cfg, width_dir, seed, run_name, output_dir)
 
     t0 = time.time()
     train_out = method.train(train_config, output_dir)
@@ -422,43 +440,43 @@ def run_one(method_name: str, config: OrchestratorConfig, width_dir: str, seed: 
 
     # x* (calculated with FISTA like done in primer and benchmark too) depends only on (A, b, lam,
     # num_fista_iters) so we can cache it across all test sparsities and all methods.
-    xstar_cache_dir = os.path.join(config.results_dir, "xstar_cache")
+    xstar_cache_dir = os.path.join(context["results_dir"], "xstar_cache")
 
     rows: List[Dict[str, Any]] = []
     if method_kind(method_name) == "model_free":
-        for p in config.test_sparsities:
+        for p in cfg.test_sparsities:
             eval_config = dict(train_config)
             if method_name == "l2o-scale":
                 eval_config["eval"] = {
                     "test_optimizer": "L2o",
-                    "num_testing_itrs": config.model_free_eval_num_steps,
+                    "num_testing_itrs": cfg.model_free_eval_num_steps,
                     "lasso_data_dir": width_dir,
-                    "lasso_split": _test_filename(p),
+                    "lasso_split": test_filename(p),
                     # Same chunk size as training on purpose: L2O-Scale's
                     # tensor-level RNN and output scaling pool over the whole
                     # (batch, n) tensor, so this is part of the optimizer's
                     # input distribution, not just an efficiency knob.
-                    "lasso_batch_size": config.model_free_batch_size,
-                    "lasso_lam": config.lam,
+                    "lasso_batch_size": cfg.model_free_batch_size,
+                    "lasso_lam": cfg.lam,
                     "lasso_x0_mode": "aligned",
                     # Must match train() -- the per-coordinate lr state is
                     # re-initialised from this prior at eval time.
-                    "min_lr": config.scale_min_lr,
-                    "max_lr": config.scale_max_lr,
-                    "num_fista_iters": config.num_fista_iters,
+                    "min_lr": cfg.scale_min_lr,
+                    "max_lr": cfg.scale_max_lr,
+                    "num_fista_iters": cfg.num_fista_iters,
                     "xstar_cache_dir": xstar_cache_dir,
                 }
             else:
                 eval_config["eval"] = {
                     "optimizer": "L2L",
                     "lasso_data_dir": width_dir,
-                    "lasso_split": _test_filename(p),
-                    "lasso_batch_size": config.model_free_batch_size,
-                    "num_steps": config.model_free_eval_num_steps,
+                    "lasso_split": test_filename(p),
+                    "lasso_batch_size": cfg.model_free_batch_size,
+                    "num_steps": cfg.model_free_eval_num_steps,
                     # Must match train()'s lasso_lam, one for
                     # all three, so the metrics x*/f* stay comparable to all.
-                    "lasso_lam": config.lam,
-                    "num_fista_iters": config.num_fista_iters,
+                    "lasso_lam": cfg.lam,
+                    "num_fista_iters": cfg.num_fista_iters,
                     "xstar_cache_dir": xstar_cache_dir,
                 }
             if method_name == "l2o-rnnprop":
@@ -466,160 +484,46 @@ def run_one(method_name: str, config: OrchestratorConfig, width_dir: str, seed: 
                 # them to reconstruct the optimizer that the saved weights were
                 # trained under; a mismatch here would apply the checkpoint
                 # through a differently-configured normalization scheme.
-                eval_config["eval"]["beta1"] = config.model_free_rnnprop_beta1
-                eval_config["eval"]["beta2"] = config.model_free_rnnprop_beta2
+                eval_config["eval"]["beta1"] = cfg.model_free_rnnprop_beta1
+                eval_config["eval"]["beta2"] = cfg.model_free_rnnprop_beta2
             eval_output_dir = os.path.join(output_dir, "eval_p{:.2f}".format(p))
             t1 = time.time()
             eval_out = method.evaluate(eval_config, train_out.checkpoint, eval_output_dir)
             eval_sec = time.time() - t1
-            rows.append(_make_row(method_name, width, seed, p, eval_out.metrics, train_sec, eval_sec))
+            rows.append({"test_sparsity": p, "train_sec": train_sec, "eval_sec": eval_sec,
+                         **eval_out.metrics})
     else:
         eval_config = dict(train_config)
         eval_config["eval"] = {
             "data_dir": width_dir,
-            "test_files": [_test_filename(p) for p in config.test_sparsities],
-            "num_fista_iters": config.num_fista_iters,
+            "test_files": [test_filename(p) for p in cfg.test_sparsities],
+            "num_fista_iters": cfg.num_fista_iters,
             "xstar_cache_dir": xstar_cache_dir,
         }
         t1 = time.time()
         eval_out = method.evaluate(eval_config, train_out.checkpoint, output_dir)
         eval_sec = time.time() - t1
-        for p in config.test_sparsities:
-            metrics = eval_out.per_seed.get(_test_filename(p), {})
-            rows.append(_make_row(method_name, width, seed, p, metrics, train_sec, eval_sec))
+        for p in cfg.test_sparsities:
+            metrics = eval_out.per_seed.get(test_filename(p), {})
+            rows.append({"test_sparsity": p, "train_sec": train_sec, "eval_sec": eval_sec,
+                         **metrics})
     return rows
 
 
-def _load_completed(results_path: str) -> set:
-    completed = set()
-    if os.path.exists(results_path):
-        with open(results_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                d = json.loads(line)
-                completed.add((d["method"], d["width"], d["seed"]))
-    return completed
-
-
-def _git_commit() -> Optional[str]:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(__file__),
-            stderr=subprocess.DEVNULL, text=True).strip()
-    except Exception:
-        return None
-
-
-def _write_config_snapshot(cfg: OrchestratorConfig) -> None:
-    """Write config.json once per results_dir, so a summary.json produced
-    today is still traceable to the exact OrchestratorConfig/commit that
-    produced it after lasso_metrics.py or the config defaults change later.
-    Left untouched on a resumed run -- same append-only-results, don't-clobber
-    resumability as results.jsonl -- rather than overwritten with whatever
-    flags happen to be passed on a later resume.
-    """
-    path = os.path.join(cfg.results_dir, "config.json")
-    if os.path.exists(path):
-        return
-    snapshot = {
-        "config": dataclasses.asdict(cfg),
-        "git_commit": _git_commit(),
-        "written_at": datetime.now(timezone.utc).isoformat(),
-    }
-    with open(path, "w") as f:
-        json.dump(snapshot, f, indent=2)
-    print("Wrote config snapshot to {}".format(path))
-
-
-def run_sweep(cfg: OrchestratorConfig) -> None:
-    cfg.results_dir = os.path.abspath(cfg.results_dir)
-    os.makedirs(cfg.results_dir, exist_ok=True)
-    _write_config_snapshot(cfg)
-    results_path = os.path.join(cfg.results_dir, "results.jsonl")
-    errors_path = os.path.join(cfg.results_dir, "errors.jsonl")
-    completed = _load_completed(results_path)
-
-    data_root = os.path.join(cfg.results_dir, "data")
-    checkpoints_root = os.path.join(cfg.results_dir, "checkpoints")
-    needs_alista_w = "alista" in cfg.methods
-
-    for seed in cfg.seeds:
-        data_cfg = Experiment2Config(
-            seed=seed, m=cfg.m, n=cfg.n, lam=cfg.lam,
-            train_size=cfg.train_size, val_size=cfg.val_size, test_size=cfg.test_size,
-            snr_db=cfg.snr_db, test_sparsities=cfg.test_sparsities,
-            compute_alista_w=needs_alista_w,
-        )
-        seed_dir = generate_experiment2_dataset(data_cfg, data_root)
-        print("[seed {}] dataset ready: {}".format(seed, seed_dir))
-
-        for width in cfg.widths:
-            width_dir = os.path.join(seed_dir, width)
-            for method_name in cfg.methods:
-                key = (method_name, width, seed)
-                if key in completed:
-                    print("[skip, already done] {}".format(key))
-                    continue
-                print("[running] {}".format(key))
-                t0 = time.time()
-                try:
-                    rows = run_one(method_name, cfg, width_dir, seed, width, checkpoints_root)
-                except Exception as exc:  # keeps the sweep alive across a bad config/OOM/etc as the run is so long we won't actively supervise the run so
-                    # its better to go back afterwards and fix the few runs that had errors.
-                    with open(errors_path, "a") as f:
-                        f.write(json.dumps({
-                            "method": method_name, "width": width, "seed": seed,
-                            "error": str(exc), "traceback": traceback.format_exc(),
-                        }) + "\n")
-                    print("[FAILED] {} : {} (see {})".format(key, exc, errors_path))
-                    continue
-                with open(results_path, "a") as f:
-                    for row in rows:
-                        f.write(json.dumps(row) + "\n")
-                completed.add(key)
-                print("[done] {} in {:.1f}s".format(key, time.time() - t0))
-
-    summarize(results_path, os.path.join(cfg.results_dir, "summary.json"))
-
-
-def summarize(results_path: str, summary_path: str) -> None:
-    """Aggregates results.jsonl into mean/std per (method, width, test_sparsity)
-    across seeds -- Table 4: "Statistics: Mean, Std Dev across 10 runs"."""
-    if not os.path.exists(results_path):
-        return
-    rows = []
-    with open(results_path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    if not rows:
-        return
-
-    metric_keys = sorted({k for row in rows for k in row if k not in _NON_METRIC_ROW_KEYS})
-    groups: Dict[Tuple[str, str, float], List[Dict[str, Any]]] = {}
-    for row in rows:
-        key = (row["method"], row["width"], row["test_sparsity"])
-        groups.setdefault(key, []).append(row)
-
-    summary = []
-    for (method_name, width, sparsity), group_rows in sorted(groups.items()):
-        entry: Dict[str, Any] = {
-            "method": method_name, "width": width, "test_sparsity": sparsity,
-            "num_seeds": len(group_rows),
-        }
-        for k in metric_keys:
-            vals = [r[k] for r in group_rows if isinstance(r.get(k), (int, float))]
-            if vals:
-                entry[k + "_seed_mean"] = float(np.mean(vals))
-                entry[k + "_seed_std"] = float(np.std(vals))
-        summary.append(entry)
-
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    print("Wrote summary ({} groups) to {}".format(len(summary), summary_path))
+def run_experiment(cfg: OrchestratorConfig, stop_on_error: bool = False) -> None:
+    spec = SweepSpec(
+        results_dir=cfg.results_dir,
+        axes=[Axis("seed", cfg.seeds), Axis("width", cfg.widths),
+              Axis("method", cfg.methods)],
+        fanout_keys=("test_sparsity",),
+        # experiment2.py's hook, reused unchanged: it reads whatever config is
+        # in context and only touches fields both configs share.
+        prepare=[(("seed",), make_dataset)],
+        context={"experiment_config": cfg},
+        stop_on_error=stop_on_error,
+    )
+    run_sweep(spec, lambda cell, ctx: run_cell(cfg, cell, ctx), config_snapshot=cfg,
+              group_by=["method", "width", "test_sparsity"])
 
 
 def _smoke_config(results_dir: str, seeds: List[int], methods: List[str],
@@ -635,7 +539,7 @@ def _smoke_config(results_dir: str, seeds: List[int], methods: List[str],
     )
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--results_dir", required=True)
@@ -645,98 +549,64 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--smoke", action="store_true",
                    help="Tiny dims + training budgets to sanity-check the whole "
                         "pipeline in well under a minute. NOT a real Experiment-2 run.")
-    # Individual overrides (ignored if --smoke; --smoke defines its own tiny config).
-    p.add_argument("--model_free_num_epochs", type=int, default=None)
-    p.add_argument("--model_free_num_steps", type=int, default=None)
-    p.add_argument("--model_free_lr", type=float, default=None)
-    p.add_argument("--scale_min_lr", type=float, default=None,
-                   help="l2o-scale only: lower end of the log-uniform initial "
-                        "per-coordinate learning-rate prior (default 1e-3, "
-                        "pilot-derived; the library default 1e-6 never solves "
-                        "LASSO within budget). Applied at train AND eval.")
-    p.add_argument("--scale_max_lr", type=float, default=None,
-                   help="l2o-scale only: upper end of that prior (default 1e-1).")
-    p.add_argument("--scale_num_meta_iterations", type=int, default=None,
-                   help="l2o-scale only: meta-iterations per sampled training "
-                        "problem (default 1 = a fresh batch every meta-update).")
-    p.add_argument("--model_based_num_layers", type=int, default=None)
-    p.add_argument("--model_based_epochs", type=int, default=None)
-    p.add_argument("--model_based_patience", type=int, default=None)
-    p.add_argument("--num_fista_iters", type=int, default=None)
-    p.add_argument("--train_size", type=int, default=None,
-                   help="Override the number of training instances (default "
-                        "32,000, same for all 3 widths). Idea #3 in "
-                        "project_exp2_followup_experiments memory: tests "
-                        "whether wide's worse own-center performance is a "
-                        "sample-density artifact rather than a real "
-                        "distribution-width tradeoff.")
-    p.add_argument("--m", type=int, default=None,
-                   help="Override the number of measurements (default 25). "
-                        "See --n.")
-    p.add_argument("--n", type=int, default=None,
-                   help="Override the signal dimension (default 50). Use "
-                        "--m 210 --n 300 to run this file's re-centered width "
-                        "scheme at the pre-study's own Table-3 dimensions: at "
-                        "n=50 the training widths quantize hard -- 'medium' "
-                        "[0.1125, 0.2375] covers only 7 distinct support sizes "
-                        "and 'wide' [0.05, 0.30] only 14 (round(p*n) nonzeros), "
-                        "so the width contrast that is this experiment's whole "
-                        "independent variable is lumpy. At n=300 the same "
-                        "ranges give 39 and 76. (The 11 TEST sparsities do stay "
-                        "distinct at n=50 -- 1,2,5,6,8,9,10,12,15,18,20 "
-                        "nonzeros -- so it is the training widths, not the test "
-                        "grid, that motivate the larger dims.)")
-    p.add_argument("--model_free_curriculum", action="store_true",
-                   help="Enable train_dm.py/train_rnnprop.py's --if_cl "
-                        "(curriculum learning on unroll length).")
-    p.add_argument("--model_free_imitation", action="store_true",
-                   help="Enable train_dm.py/train_rnnprop.py's --if_mt "
-                        "(imitation learning from analytical optimizers).")
-    p.add_argument("--model_free_profile", action="store_true",
-                   help="Write a per-epoch (loss, meta-grad-norm) trajectory "
-                        "to <output_dir>/profile.jsonl.")
-    p.add_argument("--model_free_rnnprop_last_step_loss", action="store_true",
-                   help="RNNProp only: train against the final unroll step's "
-                        "loss only (w_T=1, w_t=0 otherwise), matching Lv, "
-                        "Jiang & Li 2017's own stated training objective, "
-                        "instead of this script's prior default of summing "
-                        "the loss over every step (DM's convention).")
-    p.add_argument("--model_based_track_training_curve", action="store_true",
-                   help="Model-based (LISTA/ALISTA) only: evaluate against "
-                        "--model_based_training_curve_sparsity's test file "
-                        "after every layer finishes training, not just once "
-                        "on the final model, and log the trajectory to "
-                        "<model_dir>/training_curve/training_curve.jsonl.")
-    p.add_argument("--model_based_training_curve_sparsity", type=float, default=None)
-    return p.parse_args()
+    p.add_argument("--stop_on_error", action="store_true",
+                   help="Re-raise a failing cell instead of recording it in "
+                        "errors.jsonl and continuing. For development.")
+    # Individual overrides (ignored if --smoke; --smoke defines its own tiny
+    # config), derived from OrchestratorConfig's scalar fields.
+    scalar_fields = add_overrides(p, OrchestratorConfig, help_texts={
+        "train_size": "Override the number of training instances (default "
+                      "32,000, same for all 3 widths). Idea #3 in "
+                      "project_exp2_followup_experiments memory: tests "
+                      "whether wide's worse own-center performance is a "
+                      "sample-density artifact rather than a real "
+                      "distribution-width tradeoff.",
+        "m": "Override the number of measurements (default 25). See --n.",
+        "n": "Override the signal dimension (default 50). Use "
+             "--m 210 --n 300 to run this file's re-centered width "
+             "scheme at the pre-study's own Table-3 dimensions: at "
+             "n=50 the training widths quantize hard -- 'medium' "
+             "[0.1125, 0.2375] covers only 7 distinct support sizes "
+             "and 'wide' [0.05, 0.30] only 14 (round(p*n) nonzeros), "
+             "so the width contrast that is this experiment's whole "
+             "independent variable is lumpy. At n=300 the same "
+             "ranges give 39 and 76. (The 11 TEST sparsities do stay "
+             "distinct at n=50 -- 1,2,5,6,8,9,10,12,15,18,20 "
+             "nonzeros -- so it is the training widths, not the test "
+             "grid, that motivate the larger dims.)",
+        "model_free_curriculum": "Enable train_dm.py/train_rnnprop.py's --if_cl "
+                                 "(curriculum learning on unroll length).",
+        "model_free_imitation": "Enable train_dm.py/train_rnnprop.py's --if_mt "
+                                "(imitation learning from analytical optimizers).",
+        "model_free_profile": "Write a per-epoch (loss, meta-grad-norm) trajectory "
+                              "to <output_dir>/profile.jsonl.",
+        "model_free_rnnprop_last_step_loss":
+            "RNNProp only: train against the final unroll step's loss only "
+            "(w_T=1, w_t=0 otherwise), matching Lv, Jiang & Li 2017's own stated "
+            "training objective, instead of this script's prior default of summing "
+            "the loss over every step (DM's convention).",
+        "model_based_track_training_curve":
+            "Model-based (LISTA/ALISTA) only: evaluate against "
+            "--model_based_training_curve_sparsity's test file after every layer "
+            "finishes training, not just once on the final model, and log the "
+            "trajectory to <model_dir>/training_curve/training_curve.jsonl.",
+    })
+    return p.parse_args(), scalar_fields
 
 
 def main() -> None:
-    args = _parse_args()
+    args, scalar_fields = _parse_args()
     if args.smoke:
         cfg = _smoke_config(args.results_dir, args.seeds, args.methods, args.widths)
     else:
         cfg = OrchestratorConfig(results_dir=args.results_dir, seeds=args.seeds,
                                  methods=args.methods, widths=args.widths)
-        for field_name in ("model_free_num_epochs", "model_free_num_steps", "model_free_lr",
-                           "scale_min_lr", "scale_max_lr", "scale_num_meta_iterations",
-                           "model_based_num_layers", "model_based_epochs", "model_based_patience",
-                           "num_fista_iters", "model_based_training_curve_sparsity", "train_size",
-                           "m", "n"):
-            value = getattr(args, field_name)
-            if value is not None:
-                setattr(cfg, field_name, value)
-        if args.model_free_curriculum:
-            cfg.model_free_curriculum = True
-        if args.model_free_imitation:
-            cfg.model_free_imitation = True
-        if args.model_free_profile:
-            cfg.model_free_profile = True
-        if args.model_free_rnnprop_last_step_loss:
-            cfg.model_free_rnnprop_last_step_loss = True
-        if args.model_based_track_training_curve:
-            cfg.model_based_track_training_curve = True
-    run_sweep(cfg)
+        apply_overrides(cfg, args, scalar_fields)
+        # __post_init__ already validated the constructor's values; re-run it
+        # so the training-curve/test_sparsities consistency check also covers
+        # anything the CLI overrides just changed.
+        cfg.__post_init__()
+    run_experiment(cfg, stop_on_error=args.stop_on_error)
 
 
 if __name__ == "__main__":

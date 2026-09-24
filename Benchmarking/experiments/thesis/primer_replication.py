@@ -57,7 +57,7 @@ nothing breaks -- but a hand-written analysis snippet expecting the old shape
 would need updating.
 
 Usage:
-    python experiments/v2/primer_replication.py --results_dir runs/primer_replication --seed 0
+    python experiments/thesis/primer_replication.py --results_dir runs/primer_replication --seed 0
 """
 
 from __future__ import annotations
@@ -68,17 +68,18 @@ import sys
 import time
 from typing import Any, Dict
 
-_V2_DIR = os.path.dirname(os.path.abspath(__file__))
-_EXPERIMENTS_DIR = os.path.dirname(_V2_DIR)
+_THESIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_THESIS_DIR)
 _BENCHMARKING_ROOT = os.path.dirname(_EXPERIMENTS_DIR)
 # Order matters and must be enforced, not assumed. Python puts the script's own
-# directory (v2/) on sys.path automatically, but a plain insert(0, ...) of the
-# others pushes it back -- and since these files share their names with the
-# pre-port originals one level up, `import experiment2` would then silently
-# resolve to experiments/experiment2.py instead of this directory's. Removing
-# each path before re-inserting makes the final order exactly V2 > experiments
-# > Benchmarking, whatever was there before.
-for _p in (_BENCHMARKING_ROOT, _EXPERIMENTS_DIR, _V2_DIR):
+# directory (thesis/) on sys.path automatically, but a plain insert(0, ...) of
+# the others pushes it back, and `import experiment2` would then resolve
+# against experiments/ or Benchmarking/ rather than this directory. Removing
+# each path before re-inserting makes the final order exactly thesis/ >
+# experiments/ > Benchmarking/, whatever was there before. (Until 2026-09-24
+# this also guarded against same-named pre-port originals one level up; those
+# are gone, but the ordering guarantee is still the thing being asserted.)
+for _p in (_BENCHMARKING_ROOT, _EXPERIMENTS_DIR, _THESIS_DIR):
     while _p in sys.path:
         sys.path.remove(_p)
     sys.path.insert(0, _p)
