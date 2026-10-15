@@ -15,8 +15,8 @@ All three share an identical CLI as follows:
 For problem="lasso_dataset" (L2O-Scale only -- Entropy/Jacobian's evaluate.py
 have no LASSO flags) evaluate.py instead walks --lasso_split deterministically
 from the split's seeded x0 and also writes L2o_recovery-lasso_dataset.npz
-(x_pred/x_true/b/x0); evaluate() then recomputes the Experiment-2 recovery
-metrics from it exactly as adapters/dm_rnnprop.py does, so every method's
+(x_pred/x_true/b/x0); evaluate() then scores it with the shared scoring code
+(core/metrics.py) exactly as adapters/dm_rnnprop.py does, so every method's
 x_pred is scored with the identical metric code and the identical FISTA x*.
 """
 
@@ -30,9 +30,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from core.config import require
-from core.lasso_metrics import evaluate_lasso_recovery
-from core.fingerprint import METRIC_KEY as FINGERPRINT_KEY, fingerprint_arrays
 from core.method import L2OMethod
+from core.metrics import compute_metrics, scoring_config_keys
 from core.result import EvalOutput, TrainOutput, summarize_trajectory
 from core.shell import REPO_ROOT, run_script
 
@@ -63,10 +62,9 @@ PROBLEM_MAP: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
 }
 
-_LASSO_RECOVERY_FILE = "L2o_recovery-lasso_dataset.npz"
-# Config keys consumed by evaluate() itself (metric recomputation), never
-# passed to evaluate.py -- same convention as adapters/dm_rnnprop.py.
-_EVAL_CONFIG_ONLY_KEYS = ("num_fista_iters", "xstar_cache_dir")
+# evaluate.py's final-iterate dump for a scored problem (core/problems.py);
+# the name is fixed whatever --test_optimizer is.
+_RECOVERY_FILE = "L2o_recovery-{}.npz"
 
 
 class ScaleFamilyMethod(L2OMethod):
@@ -178,36 +176,20 @@ class ScaleFamilyMethod(L2OMethod):
                 flags["restore_model_name"] = restore_model_name
         flags.update(self._problem_flags(config, "eval"))
         flags.update({k: v for k, v in eval_cfg.items()
-                      if k not in _EVAL_CONFIG_ONLY_KEYS})
+                      if k not in scoring_config_keys()})
 
         cmd = run_script(self.lib_dir, "evaluate.py", flags,
                          log_path=os.path.join(output_dir, "eval.log"))
         out = _read_scale_eval(save_dir, cmd)
 
-        # Experiment-2 recovery metrics, recomputed from the saved signal with
-        # the shared metric code (see module docstring).
-        recovery_path = os.path.join(save_dir, _LASSO_RECOVERY_FILE)
-        if config.get("problem") == "lasso_dataset" and os.path.exists(recovery_path):
-            lasso_data_dir = require(eval_cfg, "lasso_data_dir",
-                "{} requires config['eval']['lasso_data_dir'] when problem="
-                "'lasso_dataset'".format(self.name))
-            lam = require(eval_cfg, "lasso_lam",
-                "{} requires config['eval']['lasso_lam'] when problem='lasso_dataset' "
-                "-- must match the lambda used to generate the dataset (see "
-                "Benchmarking/data/lasso.py)".format(self.name))
-            num_fista_iters = require(eval_cfg, "num_fista_iters",
-                "{} requires config['eval']['num_fista_iters'] when "
-                "problem='lasso_dataset'".format(self.name))
+        # Fingerprint + metrics, computed from the saved final iterate with the
+        # shared scoring code (see module docstring).
+        problem = config.get("problem")
+        recovery_path = os.path.join(save_dir, _RECOVERY_FILE.format(problem))
+        if problem is not None and os.path.exists(recovery_path):
             rec = np.load(recovery_path)
-            # Instances fingerprint (see adapters/dm_rnnprop.py for the note).
-            out.metrics[FINGERPRINT_KEY] = fingerprint_arrays(
-                b=rec["b"], x_true=rec["x_true"],
-                x0=rec["x0"] if "x0" in rec.files else None)
-            a = np.load(os.path.join(lasso_data_dir, "A.npy")).astype(np.float32)
-            out.metrics.update(evaluate_lasso_recovery(
-                a, rec["b"], rec["x_true"], rec["x_pred"], lam,
-                num_fista_iters=num_fista_iters,
-                xstar_cache_dir=eval_cfg.get("xstar_cache_dir")).to_dict())
+            out.metrics.update(compute_metrics(
+                problem, {k: rec[k] for k in rec.files}, config, who=self.name))
             out.artifacts["recovery"] = recovery_path
         return out
 

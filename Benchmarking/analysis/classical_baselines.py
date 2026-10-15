@@ -21,7 +21,7 @@ Protocol (chosen to match the L2O evaluations exactly):
   * iteration k means k proximal-gradient steps applied to x0, the same
     convention as the model-free eval's `loss_record[k]` (= f(x_k), where
     x_k is the iterate after k learned steps) and as a k-layer LISTA/ALISTA;
-  * every metric goes through `core.lasso_metrics.evaluate_lasso_recovery`
+  * every metric goes through `core.lasso_metrics.compute_lasso_metrics`
     with the run's own `xstar_cache`, so f* / x* are byte-identical to what
     the L2O rows used.
 
@@ -54,7 +54,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.lasso_metrics import evaluate_lasso_recovery, lasso_objective, soft_threshold  # noqa: E402
+from core.lasso_metrics import compute_lasso_metrics, lasso_objective, soft_threshold  # noqa: E402
 from data.lasso import _test_filename, _x0_filename  # noqa: E402
 
 
@@ -179,9 +179,9 @@ def main() -> None:
                     traj, snaps = run_classical(a, b, x0, lam, max_iters, method, todo)
                     np.save(os.path.join(traj_dir, "{}_seed{}_p{:.4f}.npy".format(method, seed, p)), traj)
                     for k in todo:
-                        met = evaluate_lasso_recovery(a, b, x_true, snaps[k], lam,
-                                                      num_fista_iters=args.num_fista_iters,
-                                                      xstar_cache_dir=cache_dir)
+                        met = compute_lasso_metrics(a, b, x_true, snaps[k], lam,
+                                                    num_fista_iters=args.num_fista_iters,
+                                                    xstar_cache_dir=cache_dir)
                         row = {"method": method, "iters": k, "seed": seed, "width": "all",
                                "test_sparsity": p, "final_loss": float(traj[k]),
                                "min_loss": float(np.min(traj[:k + 1])),

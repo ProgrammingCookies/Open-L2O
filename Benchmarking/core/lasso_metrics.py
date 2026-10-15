@@ -169,10 +169,10 @@ class Experiment2Metrics:
         }
 
 
-def evaluate_lasso_recovery(a: np.ndarray, b: np.ndarray, x_true: np.ndarray,
-                            x_pred: np.ndarray, lam: float,
-                            num_fista_iters: int = 50_000,
-                            xstar_cache_dir: Optional[str] = None) -> Experiment2Metrics:
+def compute_lasso_metrics(a: np.ndarray, b: np.ndarray, x_true: np.ndarray,
+                          x_pred: np.ndarray, lam: float,
+                          num_fista_iters: int = 50_000,
+                          xstar_cache_dir: Optional[str] = None) -> Experiment2Metrics:
     """Computes all four Experiment-2 metrics for one test set.
 
     a: (M, N).
@@ -188,7 +188,7 @@ def evaluate_lasso_recovery(a: np.ndarray, b: np.ndarray, x_true: np.ndarray,
     worst_relative_gap = float(np.min(gap) / max(float(np.mean(f_star)), 1e-30))
     if worst_relative_gap < -1e-4:
         warnings.warn(
-            "evaluate_lasso_recovery: x_pred beats the certified-optimal "
+            "compute_lasso_metrics: x_pred beats the certified-optimal "
             "x_star by relative gap {:.3e} on at least one instance (lam={}) "
             "-- check x_pred was produced/scored with this same lam.".format(
                 worst_relative_gap, lam))

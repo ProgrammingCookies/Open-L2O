@@ -21,9 +21,8 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from core.config import require
-from core.lasso_metrics import evaluate_lasso_recovery
-from core.fingerprint import METRIC_KEY as FINGERPRINT_KEY, fingerprint_arrays
 from core.method import L2OMethod
+from core.metrics import compute_metrics, scoring_config_keys
 from core.result import EvalOutput, TrainOutput, summarize_trajectory
 from core.shell import REPO_ROOT, run_script
 
@@ -87,9 +86,10 @@ class DMRNNPropMethod(L2OMethod):
         if config.get("seed") is not None:
             flags["seed"] = config["seed"]
 
-        # Add any additional eval flags from the config, except for those that are handled separately.
+        # Add any additional eval flags from the config, except for those consumed by
+        # the scoring code (core/metrics.py) rather than the script.
         flags.update({k: v for k, v in config.get("eval", {}).items()
-                     if k not in ("num_fista_iters", "xstar_cache_dir")})
+                     if k not in scoring_config_keys()})
         
         # runs evaluation using run_script helper function
         cmd = run_script(self.lib_dir, self.eval_script, flags,
@@ -105,42 +105,12 @@ class DMRNNPropMethod(L2OMethod):
         # Saving path to log files and data so that they can be used for further analysis or debugging.
         artifacts = {"eval_pickle": pickle_path} 
 
-        # NOTE: For problem="lasso_dataset" the eval script also saves the recovered
-        # signal + ground truth + b. Recompute the Experiment-2 recovery metrics
-        # (core/lasso_metrics.py) from that plus the shared A.npy, so every method's
-        # x_pred is scored with the identical metric formula and the identical
-        # FISTA-computed x* reference gives fair scoring.
         recovery_path = os.path.join(output_path, "{}_recovery-{}.npz".format(opt, problem))
         if os.path.exists(recovery_path):
             rec = np.load(recovery_path)
             artifacts["recovery"] = recovery_path
-            # What the script actually evaluated (instances in walk order and
-            # the starting point it used), for tests/test_fairness.py. x0 is
-            # absent from .npz files written before 2026-09-17.
-            metrics[FINGERPRINT_KEY] = fingerprint_arrays(
-                b=rec["b"], x_true=rec["x_true"],
-                x0=rec["x0"] if "x0" in rec.files else None)
-            lasso_data_dir = config.get("eval", {}).get("lasso_data_dir")
-            if lasso_data_dir is not None:
-                a = np.load(os.path.join(lasso_data_dir, "A.npy")).astype(np.float32)
-                # Required only inside this lasso-recovery branch (unlike
-                # model_based.py's evaluate(), which always runs task="lasso" so
-                # requires it unconditionally) -- this adapter also serves
-                # non-lasso problems (mnist, simple, cifar, ...) where lasso_lam
-                # is meaningless.
-                lam = require(config.get("eval", {}), "lasso_lam",
-                    "{} requires config['eval']['lasso_lam'] when problem="
-                    "'lasso_dataset' -- must match the lambda used to generate "
-                    "the dataset (see Benchmarking/data/lasso.py)".format(self.name))
-                num_fista_iters = require(config.get("eval", {}), "num_fista_iters",
-                    "{} requires config['eval']['num_fista_iters'] when "
-                    "problem='lasso_dataset'".format(self.name))
-                xstar_cache_dir = config.get("eval", {}).get("xstar_cache_dir")
-                recovery_metrics = evaluate_lasso_recovery(
-                    a, rec["b"], rec["x_true"], rec["x_pred"], lam,
-                    num_fista_iters=num_fista_iters,
-                    xstar_cache_dir=xstar_cache_dir).to_dict()
-                metrics.update(recovery_metrics)
+            metrics.update(compute_metrics(
+                problem, {k: rec[k] for k in rec.files}, config, who=self.name))
 
         return EvalOutput(metrics=metrics, trajectory=traj,
                           artifacts=artifacts, command=cmd)

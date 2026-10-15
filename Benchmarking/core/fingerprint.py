@@ -1,20 +1,20 @@
 """Instances fingerprint: the platform's evidence that methods were scored on
 the same problem instances from the same starting points (x0).
 
-An adapter's ``evaluate()`` hashes the arrays that define what its script
-evaluated (for LASSO: ``b``, ``x_true`` and the starting point ``x0``, in the
-order the script walked them) and stores the result under
-``EvalOutput.metrics[METRIC_KEY]``. Because every experiment already spreads
+The arrays that define what a script evaluated (for LASSO: ``b``, ``x_true``
+and the starting point ``x0``, in the order the script walked them) are
+hashed by ``core.metrics.compute_metrics`` -- which components, is declared
+by the problem's ``ProblemSpec.fingerprint_arrays`` (core/problems.py) -- and
+the result is stored under ``EvalOutput.metrics[METRIC_KEY]``. Because every experiment already spreads
 ``eval_out.metrics`` into its result rows, the fingerprint lands in
 ``results.jsonl`` with no experiment-side change, and ``sweep.summarize``
 skips it (non-numeric). ``tests/test_fairness.py`` then asserts that every
 method in a group reports the same fingerprint.
 
 The fingerprint is adaptable to new problem types: it only knows named arrays. What the
-arrays *are* is the adapter's business, a new problem's adapter chooses the
-components that identify one of its instances (for a neural-net optimizee
-that might be the initial parameters and the data batches consumed) and
-calls :func:`fingerprint_arrays` with them.
+arrays *are* is the problem's business, a new problem's ``ProblemSpec`` names
+the components that identify one of its instances (for a neural-net optimizee
+that might be the initial parameters and the data batches consumed).
 """
 
 from __future__ import annotations

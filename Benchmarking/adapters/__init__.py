@@ -11,6 +11,7 @@ line.
 
 from core.registry import register_method
 
+import scoring  # noqa: F401  -- registers the problem types and metrics adapters score with
 from adapters.baselines import ClassicalOptimizer
 from adapters.dm_rnnprop import DMRNNPropMethod
 from adapters.model_based import ModelBasedMethod

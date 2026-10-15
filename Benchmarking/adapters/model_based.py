@@ -14,10 +14,10 @@ This is resolved here by treating each unrolled layer as one iteration.
               <model_dir>/all_test_metrics.json + <model_dir>/<file>_final_output.npy
               (the model's recovered sparse signal)
 
-The following metrics (core/lasso_metrics.py: suboptimality gap,
-modified relative loss, NMSE vs x_true, LASSO-optimal recovery error) are also
-recomputed per test file from that final_output.npy plus the split file's own
-b, x_true rows, and folded into EvalOutput.metrics/per_seed.
+Each test file's final_output.npy, plus the split file's own b, x_true rows,
+is scored per test file by the shared scoring code (core/metrics.py: the
+problem "lasso"'s fingerprint and metrics, by default the four Table-4
+metrics) and folded into EvalOutput.metrics/per_seed.
 
 NOTE: Currently only handles LASSO problems.
 TODO: Add support for other problems?
@@ -33,13 +33,13 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from core.config import require
-from core.lasso_metrics import evaluate_lasso_recovery
-from core.fingerprint import METRIC_KEY as FINGERPRINT_KEY, fingerprint_arrays
 from core.method import L2OMethod
+from core.metrics import compute_metrics, scoring_config_keys
 from core.result import EvalOutput, TrainOutput, summarize_trajectory
 from core.shell import REPO_ROOT, run_script
 
 _LIB_DIR = "Model_Base_L2O"
+_SCORED_PROBLEM = "lasso"
 
 # supported model's names (must match Model_Base_L2O/train.py's --model_name choices)
 #
@@ -220,8 +220,8 @@ class ModelBasedMethod(L2OMethod):
                 "config['eval']['data_dir']", eval_cfg["data_dir"],
                 "using {!r} instead (resolved via _data_dir()).".format(data_dir))
         eval_overrides = {k: v for k, v in eval_cfg.items()
-                          if k not in ("data_dir", "test_files", "num_fista_iters",
-                                       "xstar_cache_dir", "lasso_lam")}
+                          if k not in ("data_dir", "test_files", "lasso_lam")
+                          and k not in scoring_config_keys()}
         flags.update(eval_overrides)
         flags["data_dir"] = data_dir
         flags["base_dir"] = base_dir
@@ -229,25 +229,15 @@ class ModelBasedMethod(L2OMethod):
         cmd = run_script(self.lib_dir, "train.py", flags,
                          log_path=os.path.join(output_dir, "eval.log"))
         model_dir = self._model_dir(base_dir, config)
-
-        num_fista_iters = require(eval_cfg, "num_fista_iters",
-            "{}.evaluate requires config['eval']['num_fista_iters'] (FISTA "
-            "iteration count for the x* reference solve -- see "
-            "core/lasso_metrics.py)".format(self.name))
-        xstar_cache_dir = eval_cfg.get("xstar_cache_dir")
-        return _read_model_based_eval(model_dir, data_dir, test_files,
-                                      self._lasso_lam(config), num_fista_iters, cmd,
-                                      xstar_cache_dir)
+        return _read_model_based_eval(model_dir, data_dir, test_files, config, cmd, self.name)
 
 
 def _read_model_based_eval(model_dir: str, data_dir: str, test_files: List[str],
-                           lam: float, num_fista_iters: int, command: str,
-                           xstar_cache_dir: Optional[str] = None) -> EvalOutput:
+                           config: Dict[str, Any], command: str, who: str) -> EvalOutput:
     all_results_path = os.path.join(model_dir, "all_test_metrics.json")
     with open(all_results_path) as f:
         res_dict = json.load(f)
-    a = np.load(os.path.join(data_dir, "A.npy")).astype(np.float32)
-    m = a.shape[0]
+    m = int(np.load(os.path.join(data_dir, "A.npy"), mmap_mode="r").shape[0])
 
     per_test_file: Dict[str, Any] = {}
     artifacts: Dict[str, str] = {"all_test_metrics": all_results_path}
@@ -266,9 +256,6 @@ def _read_model_based_eval(model_dir: str, data_dir: str, test_files: List[str],
         output_path = os.path.join(model_dir, basename + "_final_output.npy")
         if os.path.exists(output_path):
             artifacts["final_output__{}".format(basename)] = output_path
-            # Recomputes the experiment 2 metrics (suboptimality gap,
-            # modified relative loss, NMSE, LASSO-optimal recovery error) from
-            # the split file's own b, x_true, rows + the model's saved output.
             split_data = np.load(os.path.join(data_dir, fname)).astype(np.float32)
             b = split_data[:, :m]
             x_true = split_data[:, m:]
@@ -286,10 +273,9 @@ def _read_model_based_eval(model_dir: str, data_dir: str, test_files: List[str],
             # is the part observed from the script itself.
             x0_path = os.path.join(data_dir, fname[:-len(".npy")] + "_x0.npy")
             x0 = np.load(x0_path).astype(np.float32) if os.path.exists(x0_path) else None
-            recovery = evaluate_lasso_recovery(a, b, x_true, x_pred, lam,
-                                               num_fista_iters=num_fista_iters,
-                                               xstar_cache_dir=xstar_cache_dir).to_dict()
-            recovery[FINGERPRINT_KEY] = fingerprint_arrays(b=b, x_true=x_true, x0=x0)
+            recovery = compute_metrics(
+                _SCORED_PROBLEM, {"x_pred": x_pred, "b": b, "x_true": x_true, "x0": x0},
+                config, who=who)
             summary.update(recovery)
             if i == 0:
                 representative_recovery = recovery
